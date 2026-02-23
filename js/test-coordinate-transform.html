@@ -1,0 +1,281 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>Coordinate Transform Test</title>
+    <style>
+        body {
+            font-family: monospace;
+            background: #1a1a1a;
+            color: #e0e0e0;
+            padding: 20px;
+        }
+        .test-case {
+            margin: 10px 0;
+            padding: 10px;
+            border: 1px solid #333;
+            border-radius: 4px;
+        }
+        .pass {
+            background: #1a3a1a;
+            border-color: #2a5a2a;
+        }
+        .fail {
+            background: #3a1a1a;
+            border-color: #5a2a2a;
+        }
+        h1 { color: #E93D82; }
+        h2 { color: #00FFD0; }
+        .label { color: #FFB800; }
+        .value { color: #88ff88; }
+        .error { color: #ff6b6b; }
+    </style>
+</head>
+<body>
+    <h1>🧪 Coordinate Transform Module Test</h1>
+    <div id="results"></div>
+    
+    <script src="./coordinate-transform.js"></script>
+    <script>
+        const CT = window.CoordinateTransform;
+        const results = document.getElementById('results');
+        let passCount = 0;
+        let failCount = 0;
+        
+        function test(name, fn) {
+            const div = document.createElement('div');
+            div.className = 'test-case';
+            try {
+                const result = fn();
+                if (result.pass) {
+                    div.classList.add('pass');
+                    div.innerHTML = `<span class="label">✓ PASS:</span> ${name}<br>${result.details || ''}`;
+                    passCount++;
+                } else {
+                    div.classList.add('fail');
+                    div.innerHTML = `<span class="error">✗ FAIL:</span> ${name}<br>${result.details || ''}`;
+                    failCount++;
+                }
+            } catch (e) {
+                div.classList.add('fail');
+                div.innerHTML = `<span class="error">✗ ERROR:</span> ${name}<br><span class="error">${e.message}</span>`;
+                failCount++;
+            }
+            results.appendChild(div);
+        }
+        
+        function assertEquals(actual, expected, tolerance = 0.001) {
+            const diff = Math.abs(actual - expected);
+            return diff <= tolerance;
+        }
+        
+        // ==================== Test Cases ====================
+        
+        // Test 1: Basic spherical to cartesian conversion
+        test('Spherical to Cartesian: Front (0°, 0°, distance=5)', () => {
+            const pos = CT.sphericalToCartesian(0, 0, 5);
+            const details = `Position: x=${pos.x.toFixed(3)}, y=${pos.y.toFixed(3)}, z=${pos.z.toFixed(3)}`;
+            return {
+                pass: assertEquals(pos.x, 0) && assertEquals(pos.y, 0) && assertEquals(pos.z, 5),
+                details: `${details}<br><span class="value">Expected: x=0, y=0, z=5</span>`
+            };
+        });
+        
+        test('Spherical to Cartesian: Right (90°, 0°, distance=5)', () => {
+            const pos = CT.sphericalToCartesian(90, 0, 5);
+            const details = `Position: x=${pos.x.toFixed(3)}, y=${pos.y.toFixed(3)}, z=${pos.z.toFixed(3)}`;
+            return {
+                pass: assertEquals(pos.x, 5) && assertEquals(pos.y, 0) && assertEquals(pos.z, 0),
+                details: `${details}<br><span class="value">Expected: x=5, y=0, z=0</span>`
+            };
+        });
+        
+        test('Spherical to Cartesian: Back (180°, 0°, distance=5)', () => {
+            const pos = CT.sphericalToCartesian(180, 0, 5);
+            const details = `Position: x=${pos.x.toFixed(3)}, y=${pos.y.toFixed(3)}, z=${pos.z.toFixed(3)}`;
+            return {
+                pass: assertEquals(pos.x, 0) && assertEquals(pos.y, 0) && assertEquals(pos.z, -5),
+                details: `${details}<br><span class="value">Expected: x=0, y=0, z=-5</span>`
+            };
+        });
+        
+        test('Spherical to Cartesian: High angle (0°, 45°, distance=5)', () => {
+            const pos = CT.sphericalToCartesian(0, 45, 5);
+            const expectedY = 5 * Math.sin(Math.PI / 4);
+            const expectedZ = 5 * Math.cos(Math.PI / 4);
+            const details = `Position: x=${pos.x.toFixed(3)}, y=${pos.y.toFixed(3)}, z=${pos.z.toFixed(3)}`;
+            return {
+                pass: assertEquals(pos.x, 0) && assertEquals(pos.y, expectedY) && assertEquals(pos.z, expectedZ),
+                details: `${details}<br><span class="value">Expected: x=0, y=${expectedY.toFixed(3)}, z=${expectedZ.toFixed(3)}</span>`
+            };
+        });
+        
+        // Test 2: Cartesian to spherical conversion
+        test('Cartesian to Spherical: Front position (0, 0, 5)', () => {
+            const spherical = CT.cartesianToSpherical(0, 0, 5);
+            const details = `Spherical: azimuth=${spherical.azimuth.toFixed(1)}°, elevation=${spherical.elevation.toFixed(1)}°, distance=${spherical.distance.toFixed(1)}`;
+            return {
+                pass: assertEquals(spherical.azimuth, 0) && assertEquals(spherical.elevation, 0) && assertEquals(spherical.distance, 5),
+                details: `${details}<br><span class="value">Expected: azimuth=0°, elevation=0°, distance=5</span>`
+            };
+        });
+        
+        test('Cartesian to Spherical: Right position (5, 0, 0)', () => {
+            const spherical = CT.cartesianToSpherical(5, 0, 0);
+            const details = `Spherical: azimuth=${spherical.azimuth.toFixed(1)}°, elevation=${spherical.elevation.toFixed(1)}°, distance=${spherical.distance.toFixed(1)}`;
+            return {
+                pass: assertEquals(spherical.azimuth, 90) && assertEquals(spherical.elevation, 0) && assertEquals(spherical.distance, 5),
+                details: `${details}<br><span class="value">Expected: azimuth=90°, elevation=0°, distance=5</span>`
+            };
+        });
+        
+        // Test 3: Round-trip conversion
+        test('Round-trip: (45°, 30°, 10) → Cartesian → Spherical', () => {
+            const original = { azimuth: 45, elevation: 30, distance: 10 };
+            const cartesian = CT.sphericalToCartesian(original.azimuth, original.elevation, original.distance);
+            const spherical = CT.cartesianToSpherical(cartesian.x, cartesian.y, cartesian.z);
+            const details = `Original: (${original.azimuth}°, ${original.elevation}°, ${original.distance})<br>` +
+                           `Cartesian: (${cartesian.x.toFixed(3)}, ${cartesian.y.toFixed(3)}, ${cartesian.z.toFixed(3)})<br>` +
+                           `Back to Spherical: (${spherical.azimuth.toFixed(1)}°, ${spherical.elevation.toFixed(1)}°, ${spherical.distance.toFixed(1)})`;
+            return {
+                pass: assertEquals(spherical.azimuth, original.azimuth) && 
+                      assertEquals(spherical.elevation, original.elevation) && 
+                      assertEquals(spherical.distance, original.distance),
+                details
+            };
+        });
+        
+        // Test 4: Zoom to distance conversion
+        test('Zoom to Distance: zoom=0 → distance=10', () => {
+            const distance = CT.zoomToDistance(0);
+            return {
+                pass: assertEquals(distance, 10),
+                details: `zoom=0 → distance=${distance.toFixed(1)} (expected: 10)`
+            };
+        });
+        
+        test('Zoom to Distance: zoom=10 → distance=2', () => {
+            const distance = CT.zoomToDistance(10);
+            return {
+                pass: assertEquals(distance, 2),
+                details: `zoom=10 → distance=${distance.toFixed(1)} (expected: 2)`
+            };
+        });
+        
+        test('Zoom to Distance: zoom=5 → distance=6', () => {
+            const distance = CT.zoomToDistance(5);
+            return {
+                pass: assertEquals(distance, 6),
+                details: `zoom=5 → distance=${distance.toFixed(1)} (expected: 6)`
+            };
+        });
+        
+        // Test 5: GSplat Adapter
+        test('GSplat Adapter: toGSplatPosition (0°, 0°, zoom=5)', () => {
+            const pos = CT.GSplatAdapter.toGSplatPosition(0, 0, 5);
+            const expectedDist = CT.zoomToDistance(5);
+            const details = `Position: (${pos.x.toFixed(3)}, ${pos.y.toFixed(3)}, ${pos.z.toFixed(3)})`;
+            // GSplat offsets azimuth by 180°, so z should be negative
+            return {
+                pass: assertEquals(pos.x, 0) && assertEquals(pos.y, 0) && assertEquals(pos.z, -expectedDist),
+                details: `${details}<br><span class="value">Expected: x=0, y=0, z=${(-expectedDist).toFixed(3)} (with 180° offset)</span>`
+            };
+        });
+        
+        test('GSplat Adapter: Round-trip (90°, 45°, zoom=7)', () => {
+            const original = { azimuth: 90, elevation: 45, zoom: 7 };
+            const pos = CT.GSplatAdapter.toGSplatPosition(original.azimuth, original.elevation, original.zoom);
+            const spherical = CT.GSplatAdapter.fromGSplatPosition(pos.x, pos.y, pos.z);
+            const details = `Original: (${original.azimuth}°, ${original.elevation}°, zoom=${original.zoom})<br>` +
+                           `GSplat Position: (${pos.x.toFixed(3)}, ${pos.y.toFixed(3)}, ${pos.z.toFixed(3)})<br>` +
+                           `Back to Spherical: (${spherical.azimuth.toFixed(1)}°, ${spherical.elevation.toFixed(1)}°, zoom=${spherical.zoom.toFixed(1)})`;
+            return {
+                pass: assertEquals(spherical.azimuth, original.azimuth) && 
+                      assertEquals(spherical.elevation, original.elevation) && 
+                      assertEquals(spherical.zoom, original.zoom, 0.1),
+                details
+            };
+        });
+        
+        // Test 6: Three.js Adapter
+        test('ThreeJS Adapter: toThreePosition (0°, 0°, zoom=5)', () => {
+            const pos = CT.ThreeJSAdapter.toThreePosition(0, 0, 5, {x: 0, y: 0.5, z: 0});
+            const details = `Position: (${pos.x.toFixed(3)}, ${pos.y.toFixed(3)}, ${pos.z.toFixed(3)})`;
+            // Three.js uses -sin for clockwise, so at 0° should have positive z
+            return {
+                pass: assertEquals(pos.x, 0) && assertEquals(pos.y, 0.5) && pos.z > 0,
+                details: `${details}<br><span class="value">Expected: x=0, y=0.5, z>0</span>`
+            };
+        });
+        
+        test('ThreeJS Adapter: Round-trip (135°, 30°, zoom=3)', () => {
+            const original = { azimuth: 135, elevation: 30, zoom: 3 };
+            const pos = CT.ThreeJSAdapter.toThreePosition(original.azimuth, original.elevation, original.zoom, {x: 0, y: 0.5, z: 0});
+            const spherical = CT.ThreeJSAdapter.fromThreePosition(pos.x, pos.y, pos.z, {x: 0, y: 0.5, z: 0});
+            const details = `Original: (${original.azimuth}°, ${original.elevation}°, zoom=${original.zoom})<br>` +
+                           `Three.js Position: (${pos.x.toFixed(3)}, ${pos.y.toFixed(3)}, ${pos.z.toFixed(3)})<br>` +
+                           `Back to Spherical: (${spherical.azimuth.toFixed(1)}°, ${spherical.elevation.toFixed(1)}°, zoom=${spherical.zoom.toFixed(1)})`;
+            return {
+                pass: assertEquals(spherical.azimuth, original.azimuth) && 
+                      assertEquals(spherical.elevation, original.elevation) && 
+                      assertEquals(spherical.zoom, original.zoom, 0.5),
+                details
+            };
+        });
+        
+        // Test 7: Camera Labels
+        test('Camera Labels: Azimuth 0° = front view', () => {
+            const label = CT.getAzimuthLabel(0);
+            return {
+                pass: label === 'front view',
+                details: `azimuth=0° → "${label}" (expected: "front view")`
+            };
+        });
+        
+        test('Camera Labels: Azimuth 90° = right side view', () => {
+            const label = CT.getAzimuthLabel(90);
+            return {
+                pass: label === 'right side view',
+                details: `azimuth=90° → "${label}" (expected: "right side view")`
+            };
+        });
+        
+        test('Camera Labels: Elevation 0° = eye level', () => {
+            const label = CT.getElevationLabel(0);
+            return {
+                pass: label === 'eye level',
+                details: `elevation=0° → "${label}" (expected: "eye level")`
+            };
+        });
+        
+        test('Camera Labels: Zoom 5 = medium shot', () => {
+            const label = CT.getZoomLabel(5);
+            return {
+                pass: label === 'medium shot',
+                details: `zoom=5 → "${label}" (expected: "medium shot")`
+            };
+        });
+        
+        test('Camera Description: Full description generation', () => {
+            const desc = CT.generateCameraDescription(45, 30, 7);
+            const expected = "front right side view, high angle, medium-close shot";
+            return {
+                pass: desc.includes('front right side view') && desc.includes('high angle') && desc.includes('medium-close shot'),
+                details: `Description: "${desc}"<br><span class="value">Expected to contain: ${expected}</span>`
+            };
+        });
+        
+        // Summary
+        const summary = document.createElement('div');
+        summary.className = 'test-case';
+        summary.style.marginTop = '20px';
+        summary.style.fontSize = '1.2em';
+        summary.innerHTML = `<h2>Test Summary</h2>` +
+            `<span class="value">${passCount} passed</span>, ` +
+            `<span class="error">${failCount} failed</span>`;
+        results.appendChild(summary);
+        
+        console.log(`Coordinate Transform Test Complete: ${passCount} passed, ${failCount} failed`);
+    </script>
+</body>
+</html>

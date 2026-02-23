@@ -1,0 +1,28 @@
+"""
+Central node registry for this ComfyUI plugin.
+
+Keep `__init__.py` minimal by exporting all node mappings from here.
+"""
+
+from .gaussian_splat import (
+    NODE_CLASS_MAPPINGS as GAUSSIAN_NODE_CLASS_MAPPINGS,
+    NODE_DISPLAY_NAME_MAPPINGS as GAUSSIAN_NODE_DISPLAY_NAME_MAPPINGS,
+)
+from .camera_pose_qwen_panel import (
+    NODE_CLASS_MAPPINGS as QWEN_PANEL_NODE_CLASS_MAPPINGS,
+    NODE_DISPLAY_NAME_MAPPINGS as QWEN_PANEL_NODE_DISPLAY_NAME_MAPPINGS,
+)
+
+
+NODE_CLASS_MAPPINGS = {
+    **GAUSSIAN_NODE_CLASS_MAPPINGS,
+    **QWEN_PANEL_NODE_CLASS_MAPPINGS,
+}
+
+NODE_DISPLAY_NAME_MAPPINGS = {
+    **GAUSSIAN_NODE_DISPLAY_NAME_MAPPINGS,
+    **QWEN_PANEL_NODE_DISPLAY_NAME_MAPPINGS,
+}
+
+WEB_DIRECTORY = "./js"
+
