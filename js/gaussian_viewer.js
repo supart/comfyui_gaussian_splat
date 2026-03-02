@@ -89,18 +89,32 @@ function createGlobalViewer() {
     window.addEventListener('message', (event) => {
         if (!isTrustedIframeMessage(event, globalViewer?.iframe?.contentWindow)) return;
         if (!event.data || !event.data.type) return;
-        const { type, nodeId, cameraState, screenshot, cameraPanelScreenshot, outputWidth, outputHeight } = event.data;
+        const {
+            type,
+            nodeId,
+            cameraState,
+            camera_state: cameraStateSnake,
+            screenshot,
+            cameraPanelScreenshot,
+            outputWidth,
+            outputHeight,
+        } = event.data;
+        const latestCameraState = cameraState || cameraStateSnake || null;
 
         if (type === 'CONFIRM_SELECTION' && globalViewer.nodeId) {
-            handleGlobalConfirm(globalViewer.nodeId, cameraState, screenshot, cameraPanelScreenshot, outputWidth, outputHeight);
+            handleGlobalConfirm(globalViewer.nodeId, latestCameraState, screenshot, cameraPanelScreenshot, outputWidth, outputHeight);
         }
 
         if (type === 'CANCEL_SELECTION' && globalViewer.nodeId) {
-            handleGlobalCancel(globalViewer.nodeId);
+            handleGlobalCancel(globalViewer.nodeId, latestCameraState);
         }
 
         if (type === 'RESET_CAMERA_CACHE' && globalViewer.nodeId) {
             handleGlobalReset(globalViewer.nodeId);
+        }
+
+        if (type === 'ADD_CAMERA_HISTORY' && globalViewer.nodeId) {
+            handleGlobalAddHistory(globalViewer.nodeId, latestCameraState);
         }
     });
 
@@ -111,6 +125,9 @@ async function handleGlobalConfirm(nodeId, cameraState, screenshot, cameraPanelS
     console.log("[GaussianViewer] Global confirm for node:", nodeId, "output size:", outputWidth, "x", outputHeight);
     
     const node = app.graph.getNodeById(parseInt(nodeId));
+    if (node && node.viewerParams && cameraState) {
+        node.viewerParams.camera_state = cameraState;
+    }
     if (node && node.viewerParams) {
         try {
             const response = await fetch("/gaussian_viewer/confirm", {
@@ -139,9 +156,31 @@ async function handleGlobalConfirm(nodeId, cameraState, screenshot, cameraPanelS
     hideGlobalViewer();
 }
 
-async function handleGlobalCancel(nodeId) {
+async function handleGlobalCancel(nodeId, cameraState = null) {
     console.log("[GaussianViewer] Global cancel for node:", nodeId);
+    const node = app.graph.getNodeById(parseInt(nodeId));
+    if (node && node.viewerParams && cameraState) {
+        node.viewerParams.camera_state = cameraState;
+    }
     
+    if (cameraState) {
+        try {
+            await fetch("/gaussian_viewer/cache_camera_state", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    node_id: String(nodeId),
+                    camera_state: cameraState,
+                    params: {
+                        ...(app.graph.getNodeById(parseInt(nodeId))?.viewerParams || {}),
+                    },
+                }),
+            });
+        } catch (e) {
+            console.error("[GaussianViewer] Cache camera state on cancel error:", e);
+        }
+    }
+
     try {
         await fetch("/gaussian_viewer/cancel", {
             method: "POST",
@@ -174,6 +213,24 @@ async function handleGlobalReset(nodeId) {
     if (node && node.viewerParams) {
         delete node.viewerParams.camera_state;
         delete node.viewerParams.camera_history;
+    }
+}
+
+async function handleGlobalAddHistory(nodeId, cameraState) {
+    if (!cameraState) return;
+    try {
+        const response = await fetch("/gaussian_viewer/add_history", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                node_id: String(nodeId),
+                camera_state: cameraState,
+            }),
+        });
+        const result = await response.json();
+        console.log("[GaussianViewer] Add history response:", result);
+    } catch (e) {
+        console.error("[GaussianViewer] Add history error:", e);
     }
 }
 
@@ -236,6 +293,9 @@ function showGlobalViewer(nodeId, data) {
         })
         .then(arrayBuffer => {
             console.log("[GaussianViewer] Loaded PLY, size:", arrayBuffer.byteLength);
+            const node = app.graph.getNodeById(parseInt(nodeId));
+            const fallbackCameraState = node?.viewerParams?.camera_state || null;
+            const fallbackCameraHistory = node?.viewerParams?.camera_history || null;
 
             const fx = Math.max(data.width, data.height);
             const intrinsics = [
@@ -257,8 +317,8 @@ function showGlobalViewer(nodeId, data) {
                     background: data.background,
                     point_size: data.point_size,
                     // pass through cached camera state & history from backend if present
-                    camera_state: data.camera_state || null,
-                    camera_history: data.camera_history || null,
+                    camera_state: data.camera_state || fallbackCameraState,
+                    camera_history: data.camera_history || fallbackCameraHistory,
                 },
                 timestamp: Date.now()
             }, TARGET_ORIGIN, [arrayBuffer]);
@@ -291,11 +351,15 @@ api.addEventListener("gaussian_viewer_show", (event) => {
     
     const node = app.graph.getNodeById(parseInt(nodeId));
     if (node) {
+        const prev = node.viewerParams || {};
         node.viewerParams = {
             width: data.width,
             height: data.height,
             background: data.background,
             point_size: data.point_size,
+            ply_path: data.ply_path,
+            camera_state: data.camera_state || prev.camera_state || null,
+            camera_history: data.camera_history || prev.camera_history || null,
         };
         showGlobalViewer(nodeId, data);
     }

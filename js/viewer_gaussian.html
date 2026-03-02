@@ -251,6 +251,27 @@
             font-weight: 600;
         }
 
+        .history-panel-actions {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        #addHistoryBtn {
+            background: #2a3a4a;
+            border: 1px solid #4a6a8a;
+            color: #8fd3ff;
+            padding: 3px 8px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 10px;
+        }
+
+        #addHistoryBtn:hover {
+            background: #35506a;
+            border-color: #8fd3ff;
+        }
+
         #clearHistoryBtn {
             background: #3a2a2a;
             border: 1px solid #664;
@@ -441,7 +462,7 @@
             padding: 10px 16px;
             background: #1a1a2a;
             border-top: 1px solid #333;
-            pointer-events: auto; /* 确保滑条可以交互 */
+            pointer-events: auto; /* 纭繚婊戞潯鍙互浜や簰 */
         }
         
         .slider-group {
@@ -449,11 +470,11 @@
         }
         
         .slider-group.zoom-slider {
-            flex: 2; /* 缩放滑块更宽 */
+            flex: 2; /* 缂╂斁婊戝潡鏇村 */
         }
         
         .slider-group.preview-only {
-            flex: 0.8; /* 预览区域更窄 */
+            flex: 0.8; /* 棰勮鍖哄煙鏇寸獎 */
         }
         
         .slider-group .slider-header {
@@ -546,8 +567,7 @@
         .hidden { display: none !important; }
     </style>
 </head>
-<body>
-    <!-- Toolbar -->
+<body>    <!-- Toolbar -->
     <div id="toolbar">
         <div class="tool-group">
             <button class="tool-btn active" data-tool="orbit" title="旋转视角 (V)">🔄</button>
@@ -589,7 +609,7 @@
             <!-- 3D Scene for Camera Visualization -->
             <div id="threejsContainer"></div>
             
-            <!-- Camera Info Display - 相机姿态 -->
+            <!-- Camera Info Display -->
             <div id="cameraInfoDisplay">
                 <div class="section-title">【相机姿态】</div>
                 <div class="info-row compact">
@@ -598,7 +618,7 @@
                     <span class="info-tag tag-azimuth" id="azimuthLabelDisplay">front view</span>
                 </div>
                 <div class="info-row compact">
-                    <span class="info-label">X轴(俯仰)</span>
+                    <span class="info-label">X轴(垂直)</span>
                     <span class="info-value-compact" id="elevationDisplay">0°</span>
                     <span class="info-tag tag-elevation" id="elevationLabelDisplay">eye level</span>
                 </div>
@@ -606,6 +626,10 @@
                     <span class="info-label">缩放距离</span>
                     <span class="info-value-compact" id="zoomDisplay">5</span>
                     <span class="info-tag tag-zoom" id="zoomLabelDisplay">medium shot</span>
+                </div>
+                <div class="info-row compact">
+                    <span class="info-label">水平校正</span>
+                    <span class="info-value-compact" id="rollDisplay">0°</span>
                 </div>
             </div>
             
@@ -622,7 +646,10 @@
         <div id="historyPanel">
             <div class="history-panel-header">
                 <span class="history-panel-title">历史镜头</span>
-                <button id="clearHistoryBtn" title="清除所有历史镜头">重置</button>
+                <div class="history-panel-actions">
+                    <button id="addHistoryBtn" title="将当前相机位置添加到历史镜头">添加到历史相机</button>
+                    <button id="clearHistoryBtn" title="清除所有历史镜头">重置</button>
+                </div>
             </div>
             <div id="cameraHistoryList" class="history-list"></div>
         </div>
@@ -649,6 +676,12 @@
                 <span id="elevationPreview" class="value-preview">0°</span>
             </div>
         </div>
+        <div class="slider-group preview-only">
+            <div class="slider-header">
+                <span class="slider-label">水平校正</span>
+                <span id="rollPreview" class="value-preview">0°</span>
+            </div>
+        </div>
     </div>
     
     <!-- Status Bar -->
@@ -659,8 +692,8 @@
         <div class="controls-row">
             <div class="control-group">
                 <span>缩放:</span>
-                <input type="range" id="gaussianScaleSlider" min="0.001" max="4" step="0.001" value="1">
-                <input type="number" id="gaussianScaleValue" min="0.001" max="4" step="0.001" value="1">
+                <input type="range" id="gaussianScaleSlider" min="0.1" max="4" step="0.1" value="1.0">
+                <input type="number" id="gaussianScaleValue" min="0.1" max="4" step="0.1" value="1.0">
             </div>
             <div class="control-group">
                 <span>焦距:</span>
@@ -671,6 +704,21 @@
                 <span>视图裁切:</span>
                 <input type="range" id="depthRangeSlider" min="0.01" max="5" step="0.01" value="5">
                 <span id="depthRangeValue">全部</span>
+            </div>
+            <div class="control-group">
+                <span>水平校正:</span>
+                <input type="range" id="rollSlider" min="-90" max="90" step="1" value="0">
+                <input type="number" id="rollInput" min="-90" max="90" step="1" value="0">
+            </div>
+            <div class="control-group">
+                <span>相机中心:</span>
+                <input type="number" id="orbitCenterX" step="0.01" value="0" title="center X" style="width:58px;">
+                <input type="number" id="orbitCenterY" step="0.01" value="0" title="center Y" style="width:58px;">
+                <input type="number" id="orbitCenterZ" step="0.01" value="0" title="center Z" style="width:58px;">
+                <button id="useCurrentOrbitCenter" class="action-btn" title="读取当前画面中心">读取</button>
+                <button id="applyOrbitCenter" class="action-btn" title="应用为自定义画面中心">应用</button>
+                <button id="clearOrbitCenter" class="action-btn" title="清除自定义画面中心">清除</button>
+                <button id="pickOrbitCenter" class="action-btn" title="指定中心：点击后再点击一个高斯点">🎯</button>
             </div>
             <div class="control-group">
                 <span>相机:</span>
@@ -697,7 +745,6 @@
             <button id="confirmBtn" class="btn-confirm">✓确认</button>
         </div>
     </div>
-    
     <!-- Three.js for 3D Camera Control -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
     <script src="./gsplat-bundle.js"></script>
@@ -712,9 +759,10 @@
         // ===== 3D Camera Control Scene =====
         let threeScene = null;
         let cameraState = {
-            azimuth: 0,      // 方位角：0-360度
-            elevation: 0,    // 仰角：-30到90度
-            zoom: 5          // 默认缩放为5
+            azimuth: 0,      // 鏂逛綅瑙掞細0-360搴?
+            elevation: 0,    // 浠拌锛?30鍒?0搴?
+            zoom: 5,         // 榛樿缂╂斁涓?
+            roll: 0          // 姘村钩鏍℃锛?90鍒?0搴?
         };
         
         // Camera label functions - now using unified module
@@ -749,17 +797,21 @@
             if (elLabel) elLabel.textContent = getElevationLabel(cameraState.elevation);
             if (zoomDisplay) zoomDisplay.textContent = parseFloat(cameraState.zoom).toFixed(1);
             if (zoomLabelDisplay) zoomLabelDisplay.textContent = getZoomLabel(cameraState.zoom);
+            const rollDisplay = document.getElementById('rollDisplay');
+            if (rollDisplay) rollDisplay.textContent = Math.round(cameraState.roll || 0) + '°';
             
             // Update value previews (read-only)
             const azPreview = document.getElementById('azimuthPreview');
             const elPreview = document.getElementById('elevationPreview');
-            // zoomSlider和zoomInput不再自动更新，保持用户手动设置的值
+            const rollPreview = document.getElementById('rollPreview');
+            // zoomSlider鍜寊oomInput涓嶅啀鑷姩鏇存柊锛屼繚鎸佺敤鎴锋墜鍔ㄨ缃殑鍊?
             
             if (azPreview) azPreview.textContent = Math.round(cameraState.azimuth) + '°';
             if (elPreview) elPreview.textContent = Math.round(cameraState.elevation) + '°';
+            if (rollPreview) rollPreview.textContent = Math.round(cameraState.roll || 0) + '°';
             
-            // 缩放距离完全手动控制，不再从cameraState自动同步
-            // zoomSlider和zoomInput的值由用户手动输入控制
+            // 缂╂斁璺濈瀹屽叏鎵嬪姩鎺у埗锛屼笉鍐嶄粠cameraState鑷姩鍚屾
+            // zoomSlider鍜寊oomInput鐨勫€肩敱鐢ㄦ埛鎵嬪姩杈撳叆鎺у埗
             
             // Update description
             const description = generateCameraDescription(Math.round(cameraState.azimuth), Math.round(cameraState.elevation), Math.round(cameraState.zoom));
@@ -778,7 +830,7 @@
             const scene = new THREE.Scene();
             scene.background = new THREE.Color(0x0a0a0f);
             
-            // Camera - 斜视角，和QwenMultiAngle一样
+            // Camera - 鏂滆瑙掞紝鍜孮wenMultiAngle涓€鏍?
             const camera = new THREE.PerspectiveCamera(45, width / height, 0.1, 1000);
             camera.position.set(4, 3.5, 4);
             camera.lookAt(0, 0.3, 0);
@@ -811,7 +863,7 @@
             const AZIMUTH_RADIUS = 1.8;
             const ELEVATION_RADIUS = 1.4;
             
-            // Subject placeholder (image plane) - 和QwenMultiAngle一样
+            // Subject placeholder (image plane) - 鍜孮wenMultiAngle涓€鏍?
             const planeGeo = new THREE.PlaneGeometry(1.2, 1.2);
             const planeMat = new THREE.MeshBasicMaterial({
                 color: 0x3a3a4a,
@@ -974,13 +1026,13 @@
                 
                 camGlow.position.copy(cameraIndicator.position);
                 
-                // Azimuth handle - 0°=Z+, 90°=X+右, 180°=Z-, 270°=X-左
+                // Azimuth handle - 0°=Z+, 90°=X+鍙? 180°=Z-, 270°=X-宸?
                 const azRad = CT.degToRad(cameraState.azimuth);
-                const azX = AZIMUTH_RADIUS * Math.sin(azRad);   // 90°时X为正（右侧）
+                const azX = AZIMUTH_RADIUS * Math.sin(azRad);   // 90°鏃禭涓烘锛堝彸渚э級
                 const azZ = AZIMUTH_RADIUS * Math.cos(azRad);
                 azimuthHandle.position.set(azX, 0.16, azZ);
                 
-                // Elevation handle - 正仰角(俯视)时手柄在上方(Y增大)
+                // Elevation handle - 姝ｄ话瑙?淇)鏃舵墜鏌勫湪涓婃柟(Y澧炲ぇ)
                 const elRad = CT.degToRad(cameraState.elevation);
                 const elY = CENTER.y + ELEVATION_RADIUS * Math.sin(elRad);
                 const elZ = ELEVATION_RADIUS * Math.cos(elRad);
@@ -1029,7 +1081,6 @@
                         isDragging = true;
                         dragTarget = h.name;
                         renderer.domElement.style.cursor = 'grabbing';
-                        // 记录拖动开始时的状态
                         if (h.name === 'distance') {
                             dragStartMouseY = mouse.y;
                             dragStartZoom = cameraState.zoom;
@@ -1069,7 +1120,7 @@
                 if (dragTarget === 'azimuth') {
                     plane.setFromNormalAndCoplanarPoint(new THREE.Vector3(0, 1, 0), new THREE.Vector3(0, 0, 0));
                     if (raycaster.ray.intersectPlane(plane, intersect)) {
-                        // 统一系统：0°=前方(Z+), 90°=右边(X+), 180°=后方(Z-), 270°=左边(X-)
+                        // 缁熶竴绯荤粺锛?°=鍓嶆柟(Z+), 90°=鍙宠竟(X+), 180°=鍚庢柟(Z-), 270°=宸﹁竟(X-)
                         let angle = Math.atan2(intersect.x, intersect.z) * (180 / Math.PI);
                         if (angle < 0) angle += 360;
                         angle = angle % 360;
@@ -1083,7 +1134,7 @@
                     if (raycaster.ray.intersectPlane(elevPlane, intersect)) {
                         const relY = intersect.y - CENTER.y;
                         const relZ = intersect.z;
-                        // 仰角：手柄在上方(relY>0)=正角度，向上拖动=正仰角
+                        // 浠拌锛氭墜鏌勫湪涓婃柟(relY>0)=姝ｈ搴︼紝鍚戜笂鎷栧姩=姝ｄ话瑙?
                         let angle = Math.atan2(relY, relZ) * (180 / Math.PI);
                         angle = Math.max(-30, Math.min(90, angle));
                         cameraState.elevation = Math.round(angle);
@@ -1092,9 +1143,9 @@
                         syncToGaussianViewer();
                     }
                 } else if (dragTarget === 'distance') {
-                    // 缩放距离完全手动控制，拖动距离手柄不再更新任何值
-                    // zoom值只能通过滑块或输入框手动调整
-                    // 此处不做任何操作
+                    // 缂╂斁璺濈瀹屽叏鎵嬪姩鎺у埗锛屾嫋鍔ㄨ窛绂绘墜鏌勪笉鍐嶆洿鏂颁换浣曞€?
+                    // zoom鍊煎彧鑳介€氳繃婊戝潡鎴栬緭鍏ユ鎵嬪姩璋冩暣
+                    // 姝ゅ涓嶅仛浠讳綍鎿嶄綔
                 }
             }
             
@@ -1110,7 +1161,7 @@
             renderer.domElement.addEventListener('mouseup', onPointerUp);
             renderer.domElement.addEventListener('mouseleave', onPointerUp);
             
-            // 禁用滚轮事件，防止影响3D相机控制
+            // 绂佺敤婊氳疆浜嬩欢锛岄槻姝㈠奖鍝?D鐩告満鎺у埗
             renderer.domElement.addEventListener('wheel', (e) => {
                 e.preventDefault();
                 e.stopPropagation();
@@ -1141,24 +1192,25 @@
             
             // Public API
             threeScene = {
-                updatePositions: (az, el, zm) => {
+                updatePositions: (az, el, zm, rl) => {
                     cameraState.azimuth = az;
                     cameraState.elevation = el;
-                    // zoom值保持不变，不从外部更新
+                    if (typeof rl === 'number') cameraState.roll = Math.max(-90, Math.min(90, rl));
                     updateVisuals();
                     updateCameraDisplay();
                 },
-                // zoom值完全手动控制，不再提供updateZoomOnly接口
+                // zoom鍊煎畬鍏ㄦ墜鍔ㄦ帶鍒讹紝涓嶅啀鎻愪緵updateZoomOnly鎺ュ彛
                 updateZoomOnly: (zm) => {
-                    // 不再自动更新zoom值
-                    // cameraState.zoom保持用户手动设置的值
+                    // 涓嶅啀鑷姩鏇存柊zoom鍊?
+                    // cameraState.zoom淇濇寔鐢ㄦ埛鎵嬪姩璁剧疆鐨勫€?
                 },
-                // 重置时强制更新所有参数（包括zoom）
-                reset: (az, el, zm) => {
+                // 閲嶇疆鏃跺己鍒舵洿鏂版墍鏈夊弬鏁帮紙鍖呮嫭zoom锛?
+                reset: (az, el, zm, rl) => {
                     cameraState.azimuth = az;
                     cameraState.elevation = el;
                     cameraState.zoom = zm;
-                    // 更新滑块和输入框
+                    cameraState.roll = typeof rl === 'number' ? rl : 0;
+                    // 鏇存柊婊戝潡鍜岃緭鍏ユ
                     const zoomSlider = document.getElementById('zoomSlider');
                     const zoomInput = document.getElementById('zoomInput');
                     if (zoomSlider) zoomSlider.value = zm;
@@ -1166,7 +1218,7 @@
                     updateVisuals();
                     updateCameraDisplay();
                 },
-                // 截图 Three.js 渲染面板，固定输出 512×512
+                // 鎴浘 Three.js 娓叉煋闈㈡澘锛屽浐瀹氳緭鍑?512×512
                 capture: () => {
                     try {
                         renderer.render(scene, camera);
@@ -1188,7 +1240,7 @@
         // Sync to Gaussian Viewer
         function syncToGaussianViewer() {
             if (window.syncCameraToViewer) {
-                window.syncCameraToViewer(cameraState.azimuth, cameraState.elevation, cameraState.zoom);
+                window.syncCameraToViewer(cameraState.azimuth, cameraState.elevation, cameraState.zoom, null, cameraState.roll || 0);
             }
         }
         
@@ -1197,17 +1249,17 @@
             // Initialize Three.js scene
             initThreeJSScene();
             
-            // Setup zoom slider event - 只更新显示，不同步到Gaussian Viewer
+            // Setup zoom slider event - 鍙洿鏂版樉绀猴紝涓嶅悓姝ュ埌Gaussian Viewer
             document.getElementById('zoomSlider').addEventListener('input', (e) => {
                 const value = parseFloat(e.target.value);
                 cameraState.zoom = value;
                 document.getElementById('zoomInput').value = value;
                 updateCameraDisplay();
                 if (threeScene) threeScene.updatePositions(cameraState.azimuth, cameraState.elevation, cameraState.zoom);
-                // 不再自动同步到Gaussian Viewer
+                // 涓嶅啀鑷姩鍚屾鍒癎aussian Viewer
             });
             
-            // Setup zoom input event (manual input) - 只更新显示，不同步到Gaussian Viewer
+            // Setup zoom input event (manual input) - 鍙洿鏂版樉绀猴紝涓嶅悓姝ュ埌Gaussian Viewer
             document.getElementById('zoomInput').addEventListener('change', (e) => {
                 let value = parseFloat(e.target.value);
                 value = Math.max(0, Math.min(10, value));
@@ -1216,7 +1268,7 @@
                 document.getElementById('zoomSlider').value = value;
                 updateCameraDisplay();
                 if (threeScene) threeScene.updatePositions(cameraState.azimuth, cameraState.elevation, cameraState.zoom);
-                // 不再自动同步到Gaussian Viewer
+                // 涓嶅啀鑷姩鍚屾鍒癎aussian Viewer
             });
             
             // Copy description button
@@ -1233,21 +1285,22 @@
             
             // Reset camera button
             document.getElementById('resetCamera').addEventListener('click', () => {
-                // 重置3D面板状态
+                // 閲嶇疆3D闈㈡澘鐘舵€?
                 cameraState.azimuth = 0;
                 cameraState.elevation = 0;
-                cameraState.zoom = 5; // 默认缩放为5
+                cameraState.zoom = 5;
+                cameraState.roll = 0;
                 updateCameraDisplay();
-                if (threeScene) threeScene.updatePositions(0, 0, 5);
+                if (threeScene) threeScene.updatePositions(0, 0, 5, 0);
                 
-                // 调用viewer_editor.js中的resetCamera函数进行完整重置
+                // 璋冪敤viewer_editor.js涓殑resetCamera鍑芥暟杩涜瀹屾暣閲嶇疆
                 if (window.parent && window.parent.resetCamera) {
                     window.parent.resetCamera();
                 } else if (window.resetCamera) {
                     window.resetCamera();
                 }
                 
-                // 同步到Gaussian Viewer
+                // 鍚屾鍒癎aussian Viewer
                 syncToGaussianViewer();
             });
             
@@ -1257,6 +1310,13 @@
                     window.clearCameraHistory();
                 }
             });
+
+            // Add current camera to history button
+            document.getElementById('addHistoryBtn').addEventListener('click', () => {
+                if (window.addCurrentCameraToHistory) {
+                    window.addCurrentCameraToHistory();
+                }
+            });
             
             // Initial display update
             updateCameraDisplay();
@@ -1264,3 +1324,5 @@
     </script>
 </body>
 </html>
+
+

@@ -29,6 +29,102 @@ CANCELLED_NODES = set()
 #   "history:{node_id}" -> list[dict] of camera_state snapshots (recent first)
 CAMERA_STATE_CACHE = {}
 MAX_PLY_FILE_SIZE_BYTES = 512 * 1024 * 1024  # 512MB hard cap for in-memory transfer
+MAX_CAMERA_HISTORY_ITEMS = 10
+
+
+def _to_float(value, default):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _to_int(value, default=None):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _normalize_camera_snapshot(camera_state):
+    if not isinstance(camera_state, dict):
+        return None
+
+    azimuth = _to_float(camera_state.get("azimuth"), 0.0)
+    elevation = _to_float(camera_state.get("elevation"), 0.0)
+    distance = _to_float(camera_state.get("distance"), 5.0)
+    roll = _to_float(camera_state.get("roll"), 0.0)
+    seq = _to_int(camera_state.get("seq"), None)
+
+    description = camera_state.get("description") or generate_camera_description(
+        azimuth, elevation, distance
+    )
+    position = camera_state.get("position")
+    target = camera_state.get("target")
+    orbit_center = camera_state.get("orbitCenter")
+
+    snapshot = {
+        "azimuth": azimuth,
+        "elevation": elevation,
+        "distance": distance,
+        "roll": roll,
+        "description": description,
+        "timestamp": time.time(),
+        "position": position,
+        "target": target,
+        "orbitCenter": orbit_center,
+    }
+    if seq is not None and seq > 0:
+        snapshot["seq"] = seq
+    return snapshot
+
+
+def _is_same_pose(a, b):
+    if not isinstance(a, dict) or not isinstance(b, dict):
+        return False
+    epsilon = 1e-4
+    return (
+        abs(_to_float(a.get("azimuth"), 0.0) - _to_float(b.get("azimuth"), 0.0)) < epsilon
+        and abs(_to_float(a.get("elevation"), 0.0) - _to_float(b.get("elevation"), 0.0)) < epsilon
+        and abs(_to_float(a.get("distance"), 5.0) - _to_float(b.get("distance"), 5.0)) < epsilon
+        and abs(_to_float(a.get("roll"), 0.0) - _to_float(b.get("roll"), 0.0)) < epsilon
+    )
+
+
+def _cache_last_camera_state(str_key, snapshot, params):
+    if snapshot is None:
+        return
+    CAMERA_STATE_CACHE[f"node:{str_key}"] = snapshot
+    ply_path = params.get("ply_path") or params.get("filename")
+    if ply_path:
+        CAMERA_STATE_CACHE[f"ply:{ply_path}"] = snapshot
+
+
+def _append_camera_history(str_key, snapshot):
+    if snapshot is None:
+        return []
+    history_key = f"history:{str_key}"
+    history = CAMERA_STATE_CACHE.get(history_key, [])
+    if not isinstance(history, list):
+        history = []
+
+    if history and _is_same_pose(history[0], snapshot):
+        return history
+
+    max_seq = 0
+    for item in history:
+        seq = _to_int(item.get("seq"), 0)
+        if seq > max_seq:
+            max_seq = seq
+    next_seq = max_seq + 1 if max_seq > 0 else len(history) + 1
+    snapshot = dict(snapshot)
+    snapshot["seq"] = next_seq
+
+    history.insert(0, snapshot)
+    if len(history) > MAX_CAMERA_HISTORY_ITEMS:
+        history = history[:MAX_CAMERA_HISTORY_ITEMS]
+    CAMERA_STATE_CACHE[history_key] = history
+    return history
 
 
 def _safe_realpath(path):
@@ -458,54 +554,48 @@ async def gaussian_confirm(request):
     str_key = str(node_id)
     PENDING_SELECTIONS[str_key] = params
 
-    # Cache camera_state for next time if present
+    # Cache latest camera_state for next open; history is now managed explicitly
+    # by /gaussian_viewer/add_history.
     camera_state = params.get("camera_state")
-    if camera_state is not None:
-        # Normalize minimal fields we care about
-        azimuth = float(camera_state.get("azimuth", 0.0))
-        elevation = float(camera_state.get("elevation", 0.0))
-        distance = float(camera_state.get("distance", 5.0))
-        description = camera_state.get("description") or generate_camera_description(
-            azimuth, elevation, distance
-        )
-        position = camera_state.get("position")
-        target = camera_state.get("target")
-        orbit_center = camera_state.get("orbitCenter")
-        snapshot = {
-            "azimuth": azimuth,
-            "elevation": elevation,
-            "distance": distance,
-            "description": description,
-            "timestamp": time.time(),
-            "position": position,
-            "target": target,
-            "orbitCenter": orbit_center,
-        }
-
-        # Cache per node: last state
-        node_key = f"node:{str_key}"
-        CAMERA_STATE_CACHE[node_key] = snapshot
-
-        # Maintain per-node history (recent first, capped length)
-        history_key = f"history:{str_key}"
-        history = CAMERA_STATE_CACHE.get(history_key, [])
-        # Avoid pushing duplicate consecutive entries
-        if not history or any(
-            history[0].get(k) != snapshot.get(k)
-            for k in ("azimuth", "elevation", "distance")
-        ):
-            history.insert(0, snapshot)
-            # Limit history length
-            if len(history) > 10:
-                history = history[:10]
-            CAMERA_STATE_CACHE[history_key] = history
-
-        # Also cache per ply path if available (for potential reuse)
-        ply_path = params.get("ply_path") or params.get("filename")
-        if ply_path:
-            CAMERA_STATE_CACHE[f"ply:{ply_path}"] = snapshot
+    snapshot = _normalize_camera_snapshot(camera_state)
+    _cache_last_camera_state(str_key, snapshot, params)
 
     return web.json_response({"success": True})
+
+
+@PromptServer.instance.routes.post("/gaussian_viewer/add_history")
+async def gaussian_add_history(request):
+    """Append one camera snapshot to per-node history (manual action only)."""
+    data = await request.json()
+    node_id = data.get("node_id")
+    str_key = str(node_id)
+
+    snapshot = _normalize_camera_snapshot(data.get("camera_state"))
+    if snapshot is None:
+        return web.json_response({"success": False, "error": "Invalid camera_state"}, status=400)
+
+    history = _append_camera_history(str_key, snapshot)
+    return web.json_response({"success": True, "history_count": len(history)})
+
+
+@PromptServer.instance.routes.post("/gaussian_viewer/cache_camera_state")
+async def gaussian_cache_camera_state(request):
+    """Cache latest camera state without confirming selection."""
+    data = await request.json()
+    node_id = data.get("node_id")
+    str_key = str(node_id)
+
+    snapshot = _normalize_camera_snapshot(data.get("camera_state"))
+    params = data.get("params")
+    if not isinstance(params, dict):
+        params = {}
+    if not params and str_key in WAITING_NODES:
+        waiting = WAITING_NODES.get(str_key, {})
+        if isinstance(waiting, dict):
+            params = waiting
+
+    _cache_last_camera_state(str_key, snapshot, params)
+    return web.json_response({"success": True, "cached": snapshot is not None})
 
 
 @PromptServer.instance.routes.post("/gaussian_viewer/load_ply_raw")
