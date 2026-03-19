@@ -47,7 +47,7 @@ const aspectOptions = document.querySelectorAll('.aspect-option');
 
 let scene = null, camera = null, renderer = null, controls = null;
 let currentSplat = null, originalScales = null, originalPositions = null, originalColors = null, originalRotations = null, originalOpacities = null;
-let gaussianScaleCompensation = 1.0, currentScale = 1.0;
+let gaussianScaleCompensation = 1.0, currentScale = 0.3;
 let nodeId = null, viewerParams = {};
 let initialCameraData = null;
 let currentOrbitTarget = null;  // 璺熻釜 OrbitControls 褰撳墠瀹為檯 orbit 涓績锛屼笌 syncCameraToViewer 淇濇寔涓€鑷?
@@ -62,6 +62,8 @@ const TARGET_ORIGIN =
     window.location.origin && window.location.origin !== "null"
         ? window.location.origin
         : "*";
+
+initialFocalLength = 16;
 
 // Editor state
 let currentTool = 'orbit';
@@ -93,16 +95,32 @@ let customOrbitDragging = false;
 let customOrbitLastX = 0, customOrbitLastY = 0;
 let customOrbitButton = 0;
 let orbitTarget = { x: 0, y: 0, z: 0 };
-let orbitDistance = 1.65;
+let orbitDistance = 5;
 let orbitYaw = 0, orbitPitch = 0;
 let cameraOffset = { x: 0, y: 0, z: 0 };
+let pickedOrbitDragActive = false;
+let pickedOrbitDragMoved = false;
+let pickedOrbitPivot = null;
+let pickedOrbitLastX = 0;
+let pickedOrbitLastY = 0;
+let pickedOrbitViewDistance = 5;
+let pickedOrbitControlsWasEnabled = false;
 let controlsRightPanDragging = false;
 let controlsRightPanSyncFrames = 0;
 let controlsRightPanStartCameraPos = null;
 let controlsRightPanStartCenter = null;
 let controlsRightPanNeedsFinalize = false;
 let centerPickMode = false;
+let orbitCenterFeedback = null;
 const DEFAULT_INIT_CAMERA_DISTANCE = 6.0;
+const MIN_INIT_CAMERA_DISTANCE = 0.75;
+const INITIAL_CAMERA_DISTANCE_MARGIN = 1.08;
+const DEFAULT_GAUSSIAN_SCALE = 0.3;
+const DEFAULT_CAMERA_DISTANCE = 5;
+const MIN_CONTINUOUS_ZOOM_DISTANCE = 1e-6;
+const ORBIT_CENTER_FEEDBACK_DURATION_MS = 1000;
+const CAMERA_UI_UPDATE_INTERVAL_MS = 80;
+const CAMERA_PANEL_SYNC_INTERVAL_MS = 120;
 
 // Gizmo visual settings
 const GIZMO_SIZE = 100;
@@ -115,6 +133,32 @@ function isTrustedParentMessage(event) {
         return event.origin === "null" || event.origin === "";
     }
     return event.origin === TARGET_ORIGIN;
+}
+
+function formatSignatureNumber(value, digits = 3) {
+    const num = Number(value);
+    return Number.isFinite(num) ? num.toFixed(digits) : '0';
+}
+
+function getCenterSignature(center) {
+    if (!center) return 'null';
+    return [
+        formatSignatureNumber(center.x),
+        formatSignatureNumber(center.y),
+        formatSignatureNumber(center.z),
+    ].join(',');
+}
+
+function getCameraDisplaySignature(params) {
+    if (!params) return 'null';
+    const orbitCenter = getOrbitCenter() || getActiveOrbitCenter();
+    return [
+        Math.round(Number(params.azimuth) || 0),
+        Math.round(Number(params.elevation) || 0),
+        formatSignatureNumber(params.distance, 2),
+        Math.round(Number(params.roll) || 0),
+        getCenterSignature(orbitCenter),
+    ].join('|');
 }
 
 // ============== Camera Parameter Labels ==============
@@ -160,14 +204,63 @@ let cameraParams = {
     targetCenter: { x: 0, y: 0, z: 0 },
     orbitCenter: null,
     customOrbitCenter: null,
+    hasCache: false,
 };
 let lastCameraPositionForParams = null;
+let lastCameraUiSignature = '';
+let lastCameraUiUpdateAt = 0;
+let lastCameraPanelSignature = '';
+let lastCameraPanelSyncAt = 0;
+
+function forceRefreshCameraUi(params = null) {
+    const resolvedParams = params || calculateCameraParams();
+    if (!resolvedParams) return;
+    updateCameraPosDisplay(resolvedParams);
+    updateCameraParamsDisplay(resolvedParams);
+    lastCameraUiSignature = getCameraDisplaySignature(resolvedParams);
+    lastCameraUiUpdateAt = performance.now();
+}
+
+function maybeRefreshCameraUi(params = null, now = performance.now()) {
+    const resolvedParams = params || calculateCameraParams();
+    if (!resolvedParams) return;
+    const signature = getCameraDisplaySignature(resolvedParams);
+    if (signature === lastCameraUiSignature) return;
+    if ((now - lastCameraUiUpdateAt) < CAMERA_UI_UPDATE_INTERVAL_MS) return;
+    updateCameraPosDisplay(resolvedParams);
+    updateCameraParamsDisplay(resolvedParams);
+    lastCameraUiSignature = signature;
+    lastCameraUiUpdateAt = now;
+}
+
+function forceSyncViewerCameraPanel(params = null) {
+    const resolvedParams = params || calculateCameraParams();
+    if (!resolvedParams) return;
+    syncViewerToCameraPanel(resolvedParams);
+    lastCameraPanelSignature = getCameraDisplaySignature(resolvedParams);
+    lastCameraPanelSyncAt = performance.now();
+}
+
+function maybeSyncViewerCameraPanel(params = null, now = performance.now()) {
+    const resolvedParams = params || calculateCameraParams();
+    if (!resolvedParams) return;
+    const signature = getCameraDisplaySignature(resolvedParams);
+    if (signature === lastCameraPanelSignature) return;
+    if ((now - lastCameraPanelSyncAt) < CAMERA_PANEL_SYNC_INTERVAL_MS) return;
+    syncViewerToCameraPanel(resolvedParams);
+    lastCameraPanelSignature = signature;
+    lastCameraPanelSyncAt = now;
+}
 
 // Camera history list (current session)
 let cameraHistory = [];
+let pendingStartupHistoryEntry = null;
 const HISTORY_MAX_ITEMS = 10;
-const ALWAYS_START_FROM_INITIAL_CAMERA = true;
 const AUTO_ORBIT_CENTER_SAMPLE_LIMIT = 30000;
+const AUTO_ROTATE_ORBIT_CENTER_SAMPLE_LIMIT = 12000;
+const AUTO_ROTATE_ORBIT_CENTER_MAX_DISTANCE_PX = 24;
+const ORBIT_CONTROLS_PAN_SPEED = 14.4;
+const CUSTOM_ORBIT_PAN_DISTANCE_FACTOR = 0.016;
 
 // 铏氭嫙濮挎€佺悆 - 绱Н榧犳爣鏃嬭浆瑙掑害
 let virtualOrbitBall = {
@@ -246,6 +339,7 @@ function setCameraClipRange(nearVal, farVal) {
     if (typeof camera.update === 'function') {
         camera.update();
     }
+    drawOrbitCenterFeedback();
 }
 
 function cloneCenter(center) {
@@ -255,6 +349,130 @@ function cloneCenter(center) {
     const z = Number(center.z);
     if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) return null;
     return { x, y, z };
+}
+
+function getFiniteCameraNumber(value, fallback) {
+    const numeric = Number(value);
+    return Number.isFinite(numeric) ? numeric : fallback;
+}
+
+function getCachedCameraOrbitCenter(cameraState) {
+    return cloneCenter(cameraState?.orbitCenter) || cloneCenter(cameraState?.target);
+}
+
+function rememberCurrentCameraPositionForParams() {
+    if (!camera) {
+        lastCameraPositionForParams = null;
+        return;
+    }
+
+    lastCameraPositionForParams = {
+        x: camera.position.x,
+        y: camera.position.y,
+        z: camera.position.z,
+    };
+}
+
+function getCenterDistance(a, b) {
+    const ca = cloneCenter(a);
+    const cb = cloneCenter(b);
+    if (!ca || !cb) return NaN;
+    const dx = ca.x - cb.x;
+    const dy = ca.y - cb.y;
+    const dz = ca.z - cb.z;
+    return Math.sqrt(dx * dx + dy * dy + dz * dz);
+}
+
+function getCameraViewForwardVector() {
+    if (!camera?.rotation) return null;
+    const forward = camera.rotation.apply(new SPLAT.Vector3(0, 0, 1));
+    const length = Math.sqrt(
+        forward.x * forward.x +
+        forward.y * forward.y +
+        forward.z * forward.z
+    );
+    if (!Number.isFinite(length) || length < 1e-8) return null;
+    return new SPLAT.Vector3(forward.x / length, forward.y / length, forward.z / length);
+}
+
+function getCurrentViewTarget(referenceDistance = null) {
+    if (!camera) return null;
+    const forward = getCameraViewForwardVector();
+    if (!forward) return null;
+    const fallbackDistance = getCenterDistance(
+        { x: camera.position.x, y: camera.position.y, z: camera.position.z },
+        cloneCenter(cameraParams.targetCenter)
+            || cloneCenter(currentOrbitTarget)
+            || cloneCenter(cameraParams.orbitCenter)
+            || getDefaultOrbitCenter()
+    );
+    const targetDistance = Number.isFinite(Number(referenceDistance)) && Number(referenceDistance) > 1e-4
+        ? Number(referenceDistance)
+        : (Number.isFinite(fallbackDistance) && fallbackDistance > 1e-4
+            ? fallbackDistance
+            : Math.max(0.001, Number(cameraParams.distance) || DEFAULT_CAMERA_DISTANCE));
+    const next = {
+        x: camera.position.x + forward.x * targetDistance,
+        y: camera.position.y + forward.y * targetDistance,
+        z: camera.position.z + forward.z * targetDistance,
+    };
+    return next;
+}
+
+function syncControlsStateToCurrentView(referenceDistance = null) {
+    if (!controls) return null;
+    const next = getCurrentViewTarget(referenceDistance);
+    if (!next) return null;
+    cameraParams.targetCenter = cloneCenter(next);
+    controls.setCameraTarget(new SPLAT.Vector3(next.x, next.y, next.z));
+    const savedDampening = controls.dampening;
+    controls.dampening = 1;
+    controls.update();
+    controls.dampening = savedDampening;
+    return next;
+}
+
+function syncOrbitTargetToCurrentView(referenceDistance = null, updateInputs = false) {
+    const next = syncControlsStateToCurrentView(referenceDistance);
+    if (!next) return null;
+    currentOrbitTarget = cloneCenter(next);
+    cameraParams.orbitCenter = cloneCenter(next);
+    cameraParams.customOrbitCenter = null;
+    if (updateInputs) {
+        updateOrbitCenterInputs(next);
+    }
+    return next;
+}
+
+function resetCachedCameraParams() {
+    cameraParams.azimuth = 0;
+    cameraParams.elevation = 0;
+    cameraParams.distance = DEFAULT_CAMERA_DISTANCE;
+    cameraParams.roll = 0;
+    cameraParams.targetCenter = { x: 0, y: 0, z: 0 };
+    cameraParams.orbitCenter = null;
+    cameraParams.customOrbitCenter = null;
+    cameraParams.hasCache = false;
+}
+
+function applyCachedCameraState(cameraState) {
+    if (!cameraState || typeof cameraState !== 'object') {
+        resetCachedCameraParams();
+        return false;
+    }
+
+    applyAspectState(cameraState.aspectRatio, cameraState.outputWidth, cameraState.outputHeight);
+
+    const orbitCenter = getCachedCameraOrbitCenter(cameraState);
+    cameraParams.azimuth = getFiniteCameraNumber(cameraState.azimuth, 0);
+    cameraParams.elevation = getFiniteCameraNumber(cameraState.elevation, 0);
+    cameraParams.distance = getFiniteCameraNumber(cameraState.distance, DEFAULT_CAMERA_DISTANCE);
+    cameraParams.roll = getFiniteCameraNumber(cameraState.roll, 0);
+    cameraParams.targetCenter = cloneCenter(orbitCenter) || { x: 0, y: 0, z: 0 };
+    cameraParams.orbitCenter = cloneCenter(orbitCenter);
+    cameraParams.customOrbitCenter = cloneCenter(orbitCenter);
+    cameraParams.hasCache = true;
+    return true;
 }
 
 function getConfiguredOrbitCenter() {
@@ -273,8 +491,12 @@ function getDefaultOrbitCenter() {
     return { x: 0, y: 0, z: 0 };
 }
 
+function getPickedOrbitCenter() {
+    return pickedOrbitDragActive ? cloneCenter(pickedOrbitPivot) : null;
+}
+
 function getActiveOrbitCenter() {
-    return getConfiguredOrbitCenter() || getDefaultOrbitCenter();
+    return getPickedOrbitCenter() || getConfiguredOrbitCenter() || getDefaultOrbitCenter();
 }
 
 function updateOrbitCenterInputs(center = null) {
@@ -290,6 +512,24 @@ function updateOrbitCenterInputs(center = null) {
     setIfIdle(orbitCenterZInput, c.z);
 }
 
+function showOrbitCenterFeedback(center) {
+    const markerCenter = cloneCenter(center);
+    if (!markerCenter) return;
+    orbitCenterFeedback = {
+        center: markerCenter,
+        expiresAt: performance.now() + ORBIT_CENTER_FEEDBACK_DURATION_MS,
+    };
+}
+
+function hasActiveOrbitCenterFeedback(now = performance.now()) {
+    if (!orbitCenterFeedback) return false;
+    if (now >= orbitCenterFeedback.expiresAt) {
+        orbitCenterFeedback = null;
+        return false;
+    }
+    return true;
+}
+
 function readOrbitCenterInputs() {
     if (!orbitCenterXInput || !orbitCenterYInput || !orbitCenterZInput) return null;
     const x = Number(orbitCenterXInput.value);
@@ -303,13 +543,14 @@ function applyOrbitCenter(nextCenter, options = {}) {
     if (!camera || !controls) return;
     const next = cloneCenter(nextCenter);
     if (!next) return;
-    const { persistAsCustom = true, keepAngles = true } = options;
+    const { persistAsCustom = true, keepAngles = true, showFeedback = false } = options;
     const paramsBefore = calculateCameraParams();
 
     if (persistAsCustom) {
         cameraParams.customOrbitCenter = cloneCenter(next);
     }
     cameraParams.orbitCenter = cloneCenter(next);
+    cameraParams.targetCenter = cloneCenter(next);
     currentOrbitTarget = cloneCenter(next);
 
     controls.setCameraTarget(new SPLAT.Vector3(next.x, next.y, next.z));
@@ -332,6 +573,9 @@ function applyOrbitCenter(nextCenter, options = {}) {
     controls.update();
     controls.dampening = savedDampening;
     updateOrbitCenterInputs(next);
+    if (showFeedback) {
+        showOrbitCenterFeedback(next);
+    }
 }
 
 function updateMainCanvasCursor() {
@@ -368,12 +612,154 @@ function beginControlsRightPanTracking() {
     controlsRightPanStartCameraPos = camera
         ? { x: camera.position.x, y: camera.position.y, z: camera.position.z }
         : null;
-    controlsRightPanStartCenter = cloneCenter(currentOrbitTarget)
+    controlsRightPanStartCenter = cloneCenter(cameraParams.targetCenter)
+        || cloneCenter(currentOrbitTarget)
         || cloneCenter(cameraParams.orbitCenter)
         || getDefaultOrbitCenter();
     controlsRightPanNeedsFinalize = true;
     controlsRightPanDragging = true;
     controlsRightPanSyncFrames = 0;
+}
+
+function beginPickedOrbitDrag(pivot, clientX, clientY) {
+    if (!camera || !controls) return false;
+    const nextPivot = cloneCenter(pivot);
+    if (!nextPivot) return false;
+
+    const savedDampening = controls.dampening;
+    controls.dampening = 1;
+    controls.update();
+    controls.dampening = savedDampening;
+
+    const cameraPos = {
+        x: camera.position.x,
+        y: camera.position.y,
+        z: camera.position.z,
+    };
+    const baseViewDistance = getCenterDistance(
+        cameraPos,
+        cloneCenter(cameraParams.targetCenter)
+            || cloneCenter(currentOrbitTarget)
+            || cloneCenter(cameraParams.orbitCenter)
+            || getDefaultOrbitCenter()
+    );
+    const pivotDistance = getCenterDistance(cameraPos, nextPivot);
+
+    pickedOrbitDragActive = true;
+    pickedOrbitDragMoved = false;
+    pickedOrbitPivot = nextPivot;
+    pickedOrbitLastX = clientX;
+    pickedOrbitLastY = clientY;
+    pickedOrbitViewDistance = Number.isFinite(baseViewDistance) && baseViewDistance > 1e-4
+        ? baseViewDistance
+        : (Number.isFinite(pivotDistance) && pivotDistance > 1e-4
+            ? pivotDistance
+            : DEFAULT_CAMERA_DISTANCE);
+    currentOrbitTarget = cloneCenter(nextPivot);
+    cameraParams.orbitCenter = cloneCenter(nextPivot);
+    cameraParams.customOrbitCenter = cloneCenter(nextPivot);
+    updateOrbitCenterInputs(nextPivot);
+    pickedOrbitControlsWasEnabled = !!controls.enabled;
+    controls.enabled = false;
+    showOrbitCenterFeedback(nextPivot);
+    if (canvas) {
+        canvas.style.cursor = 'grabbing';
+    }
+    return true;
+}
+
+function applyWorldRotationAroundPivot(rotationQuat, pivot) {
+    if (!camera || !rotationQuat) return;
+    const center = cloneCenter(pivot);
+    if (!center) return;
+    const offset = new SPLAT.Vector3(
+        camera.position.x - center.x,
+        camera.position.y - center.y,
+        camera.position.z - center.z
+    );
+    const rotatedOffset = rotationQuat.apply(offset);
+    camera.position.x = center.x + rotatedOffset.x;
+    camera.position.y = center.y + rotatedOffset.y;
+    camera.position.z = center.z + rotatedOffset.z;
+    camera.rotation = rotationQuat.multiply(camera.rotation).normalize();
+}
+
+function rotateCameraAroundPickedPivot(pivot, dx, dy) {
+    if (!camera || !pivot) return false;
+    const speed = (controls?.orbitSpeed || 1) * 0.003;
+    const yawDelta = -dx * speed;
+    const pitchDelta = dy * speed;
+    if (Math.abs(yawDelta) < 1e-8 && Math.abs(pitchDelta) < 1e-8) {
+        return false;
+    }
+
+    if (Math.abs(yawDelta) >= 1e-8) {
+        const upAxis = camera.rotation.apply(new SPLAT.Vector3(0, 1, 0)).normalize();
+        const yawQuat = SPLAT.Quaternion.FromAxisAngle(upAxis, yawDelta).normalize();
+        applyWorldRotationAroundPivot(yawQuat, pivot);
+    }
+
+    if (Math.abs(pitchDelta) >= 1e-8) {
+        const rightAxis = camera.rotation.apply(new SPLAT.Vector3(1, 0, 0)).normalize();
+        const pitchQuat = SPLAT.Quaternion.FromAxisAngle(rightAxis, pitchDelta).normalize();
+        applyWorldRotationAroundPivot(pitchQuat, pivot);
+    }
+
+    camera.update();
+    lastCameraPositionForParams = null;
+    currentOrbitTarget = cloneCenter(pivot);
+    cameraParams.orbitCenter = cloneCenter(pivot);
+    cameraParams.customOrbitCenter = cloneCenter(pivot);
+    syncControlsStateToCurrentView(pickedOrbitViewDistance);
+    return true;
+}
+
+function updatePickedOrbitDrag(clientX, clientY) {
+    if (!pickedOrbitDragActive || !pickedOrbitPivot) return false;
+    const dx = clientX - pickedOrbitLastX;
+    const dy = clientY - pickedOrbitLastY;
+    pickedOrbitLastX = clientX;
+    pickedOrbitLastY = clientY;
+
+    if (Math.abs(dx) < 0.001 && Math.abs(dy) < 0.001) {
+        return false;
+    }
+
+    const rotated = rotateCameraAroundPickedPivot(pickedOrbitPivot, dx, dy);
+    if (!rotated) return false;
+
+    pickedOrbitDragMoved = true;
+    return true;
+}
+
+function endPickedOrbitDrag() {
+    if (!pickedOrbitDragActive) return;
+    const committedPivot = cloneCenter(pickedOrbitPivot);
+    pickedOrbitDragActive = false;
+    pickedOrbitDragMoved = false;
+    pickedOrbitPivot = null;
+
+    if (controls) {
+        if (committedPivot) {
+            currentOrbitTarget = cloneCenter(committedPivot);
+            cameraParams.orbitCenter = cloneCenter(committedPivot);
+            cameraParams.customOrbitCenter = cloneCenter(committedPivot);
+            updateOrbitCenterInputs(committedPivot);
+            syncControlsStateToCurrentView(pickedOrbitViewDistance);
+        }
+        controls.enabled = pickedOrbitControlsWasEnabled;
+    }
+
+    pickedOrbitLastX = 0;
+    pickedOrbitLastY = 0;
+    pickedOrbitViewDistance = DEFAULT_CAMERA_DISTANCE;
+    pickedOrbitControlsWasEnabled = false;
+    updateMainCanvasCursor();
+    if (committedPivot) {
+        const params = calculateCameraParams();
+        forceRefreshCameraUi(params);
+        forceSyncViewerCameraPanel(params);
+    }
 }
 
 function endControlsRightPanTracking() {
@@ -398,6 +784,7 @@ function updateOrbitCenterFromPanDelta(prevCameraPos) {
     };
 
     currentOrbitTarget = cloneCenter(next);
+    cameraParams.targetCenter = cloneCenter(next);
     cameraParams.orbitCenter = cloneCenter(next);
     cameraParams.customOrbitCenter = cloneCenter(next);
     updateOrbitCenterInputs(next);
@@ -428,6 +815,7 @@ function finalizeControlsRightPanCenter() {
         z: startCenter.z + dz,
     };
     currentOrbitTarget = cloneCenter(next);
+    cameraParams.targetCenter = cloneCenter(next);
     cameraParams.orbitCenter = cloneCenter(next);
     cameraParams.customOrbitCenter = null;
     updateOrbitCenterInputs(next);
@@ -447,21 +835,27 @@ function getRollTargetForRender() {
             z: controlsRightPanStartCenter.z + (camera.position.z - controlsRightPanStartCameraPos.z),
         };
     }
-    return getActiveOrbitCenter();
+    // Prefer the current view target so picking a new orbit center does not immediately
+    // reframe the image before the user actually drags to rotate.
+    return cloneCenter(cameraParams.targetCenter) || getActiveOrbitCenter();
 }
 
-function findNearestVisiblePointAtScreen(screenX, screenY, maxDistPx = 18) {
+function findNearestVisiblePointAtScreen(screenX, screenY, maxDistPx = 18, maxSamples = null) {
     if (!currentSplat?.data?.positions || !camera) return null;
+    const projectionContext = createProjectionContext();
+    if (!projectionContext) return null;
     const positions = currentSplat.data.positions;
     const count = currentSplat.data.vertexCount || (positions.length / 3);
+    const sampleTarget = Number.isFinite(Number(maxSamples)) ? Math.max(1, Math.floor(Number(maxSamples))) : null;
+    const stride = sampleTarget ? Math.max(1, Math.ceil(count / sampleTarget)) : 1;
     let best = null;
     let bestDist2 = maxDistPx * maxDistPx;
 
-    for (let i = 0; i < count; i++) {
+    for (let i = 0; i < count; i += stride) {
         const px = positions[i * 3];
         const py = positions[i * 3 + 1];
         const pz = positions[i * 3 + 2];
-        const projected = projectPoint({ x: px, y: py, z: pz });
+        const projected = projectPointWithContext(px, py, pz, projectionContext);
         if (!projected) continue;
         const dx = projected.x - screenX;
         const dy = projected.y - screenY;
@@ -475,35 +869,10 @@ function findNearestVisiblePointAtScreen(screenX, screenY, maxDistPx = 18) {
 }
 
 function findNearestVisiblePointToScreenCenter(maxSamples = AUTO_ORBIT_CENTER_SAMPLE_LIMIT) {
-    if (!currentSplat?.data?.positions || !camera || !canvas) return null;
-    const positions = currentSplat.data.positions;
-    const count = currentSplat.data.vertexCount || (positions.length / 3);
-    if (!count) return null;
-
+    if (!canvas) return null;
     const centerX = (canvas.clientWidth || canvas.width || 0) * 0.5;
     const centerY = (canvas.clientHeight || canvas.height || 0) * 0.5;
-    const sampleTarget = Math.max(1, Number(maxSamples) || 1);
-    const stride = Math.max(1, Math.ceil(count / sampleTarget));
-
-    let best = null;
-    let bestDist2 = Infinity;
-
-    for (let i = 0; i < count; i += stride) {
-        const px = positions[i * 3];
-        const py = positions[i * 3 + 1];
-        const pz = positions[i * 3 + 2];
-        const projected = projectPoint({ x: px, y: py, z: pz });
-        if (!projected) continue;
-        const dx = projected.x - centerX;
-        const dy = projected.y - centerY;
-        const dist2 = dx * dx + dy * dy;
-        if (dist2 < bestDist2) {
-            bestDist2 = dist2;
-            best = { x: px, y: py, z: pz, index: i };
-        }
-    }
-
-    return best;
+    return findNearestVisiblePointAtScreen(centerX, centerY, Number.POSITIVE_INFINITY, maxSamples);
 }
 
 function recenterOrbitCenterToScreenCenterNearest(options = {}) {
@@ -511,13 +880,14 @@ function recenterOrbitCenterToScreenCenterNearest(options = {}) {
         keepAngles = false,
         persistAsCustom = false,
         maxSamples = AUTO_ORBIT_CENTER_SAMPLE_LIMIT,
+        showFeedback = false,
     } = options;
     const picked = findNearestVisiblePointToScreenCenter(maxSamples);
     if (!picked) return false;
     if (!persistAsCustom) cameraParams.customOrbitCenter = null;
     applyOrbitCenter(
         { x: picked.x, y: picked.y, z: picked.z },
-        { persistAsCustom, keepAngles }
+        { persistAsCustom, keepAngles, showFeedback }
     );
     return true;
 }
@@ -544,10 +914,43 @@ function setupOrbitCenterInteraction() {
                 if (statusText) statusText.textContent += ' | no point near cursor';
                 return;
             }
-            applyOrbitCenter({ x: picked.x, y: picked.y, z: picked.z }, { persistAsCustom: true, keepAngles: true });
+            applyOrbitCenter(
+                { x: picked.x, y: picked.y, z: picked.z },
+                { persistAsCustom: true, keepAngles: true, showFeedback: true }
+            );
             setCenterPickMode(false);
             updateStatus();
             return;
+        }
+
+        if (
+            e.button === 0 &&
+            !customOrbitEnabled &&
+            controls?.enabled &&
+            !isDraggingGizmo &&
+            !isSelecting &&
+            currentTool === 'orbit'
+        ) {
+            const rect = canvas.getBoundingClientRect();
+            const x = e.clientX - rect.left;
+            const y = e.clientY - rect.top;
+            const picked = findNearestVisiblePointAtScreen(
+                x,
+                y,
+                AUTO_ROTATE_ORBIT_CENTER_MAX_DISTANCE_PX,
+                AUTO_ROTATE_ORBIT_CENTER_SAMPLE_LIMIT
+            );
+            if (picked) {
+                e.preventDefault();
+                e.stopPropagation();
+                if (typeof e.stopImmediatePropagation === 'function') e.stopImmediatePropagation();
+                beginPickedOrbitDrag(
+                    { x: picked.x, y: picked.y, z: picked.z },
+                    e.clientX,
+                    e.clientY
+                );
+                return;
+            }
         }
 
         if (
@@ -562,11 +965,21 @@ function setupOrbitCenterInteraction() {
         }
     }, true);
 
+    window.addEventListener('mousemove', (e) => {
+        if (!pickedOrbitDragActive || isDraggingGizmo || !camera) return;
+        e.preventDefault();
+        e.stopPropagation();
+        if (typeof e.stopImmediatePropagation === 'function') e.stopImmediatePropagation();
+        updatePickedOrbitDrag(e.clientX, e.clientY);
+    }, true);
+
     window.addEventListener('mouseup', (e) => {
+        if (e.button === 0) endPickedOrbitDrag();
         if (e.button === 2) endControlsRightPanTracking();
     }, true);
 
     window.addEventListener('blur', () => {
+        endPickedOrbitDrag();
         endControlsRightPanTracking();
     });
 }
@@ -761,20 +1174,17 @@ function initViewer() {
         
         // 璁剧疆鏈€灏忕缉鏀捐窛绂伙紝闃叉鐩告満绌胯繃鐩爣鐐瑰鑷存柟浣嶈璺冲彉
         // minZoom鎺у埗鐩告満鍒扮洰鏍囩偣鐨勬渶灏忚窛绂?
-        controls.minZoom = 0.2;
+        controls.minZoom = MIN_CONTINUOUS_ZOOM_DISTANCE;
         // Remove practical zoom-out cap to avoid being stuck after picking a custom orbit center.
         controls.maxZoom = 1000000;
         controls.zoomSpeed = 1;  // 鎭㈠榛樿缂╂斁閫熷害
         controls.orbitSpeed = 1.8; // 鎻愰珮宸﹂敭鏃嬭浆閫熷害锛堥伩鍏嶈繃蹇け鎺э級
-        controls.panSpeed = 1.8;   // 鎻愰珮鍙抽敭骞崇Щ閫熷害锛堥伩鍏嶈繃鍐诧級
+        controls.panSpeed = ORBIT_CONTROLS_PAN_SPEED;
         controls.dampening = 0.12; // 涓?OrbitControls 榛樿涓€鑷达紝淇濇寔绋冲畾
         
         // 璁剧疆鍒濆鐒﹁窛锛?6mm杞崲涓哄儚绱犵劍璺濓級
-        const sensorWidth = 36; // mm
-        const canvasWidth = canvas.clientWidth || 512;
-        const focalPx = (canvasWidth * initialFocalLength) / sensorWidth;
-        camera.data.fx = focalPx;
-        camera.data.fy = focalPx;
+        controls.panSpeed = ORBIT_CONTROLS_PAN_SPEED;
+        applyFocalLengthToCamera(initialFocalLength);
         // 鍚屾鏇存柊婊戝潡鏄剧ず鍊?
         focalLengthSlider.value = initialFocalLength;
         focalLengthValue.value = initialFocalLength;
@@ -792,7 +1202,7 @@ function initViewer() {
         updateOrbitCenterInputs(initialCenter);
         
         // 璁剧疆鍒濆鐩告満浣嶇疆锛岀‘淇濇柟浣嶈涓?搴?
-        const initialDistance = DEFAULT_INIT_CAMERA_DISTANCE;
+        const initialDistance = getRecommendedInitialCameraDistance();
         camera.position.x = initialCenter.x;
         camera.position.y = initialCenter.y;
         camera.position.z = initialCenter.z - initialDistance;
@@ -800,7 +1210,7 @@ function initViewer() {
         // 鍒濆鍖栫浉鏈哄弬鏁扮姸鎬?
         cameraParams.azimuth = 0;
         cameraParams.elevation = 0;
-        cameraParams.distance = 5; // 榛樿缂╂斁涓?
+        cameraParams.distance = DEFAULT_CAMERA_DISTANCE; // 榛樿缂╂斁涓?
         cameraParams.targetCenter = initialCenter;
 
         const resize = () => {
@@ -812,31 +1222,26 @@ function initViewer() {
             updateRenderFrame();
             // 閲嶆柊璁＄畻鐒﹁窛浠ュ尮閰嶅綋鍓嶇敾甯冨昂瀵?
             if (camera) {
-                const sensorWidth = 36; // mm
-                const canvasWidth = canvas.clientWidth || 512;
-                const focalPx = (canvasWidth * initialFocalLength) / sensorWidth;
-                camera.data.fx = focalPx;
-                camera.data.fy = focalPx;
+                applyFocalLengthToCamera(getCurrentFocalLengthValue(initialFocalLength));
             }
         };
         window.addEventListener('resize', resize);
         resize();
 
         // 鍚屾璁℃暟鍣紙鐢ㄤ簬鑺傛祦锛?
-        let syncFrameCount = 0;
-        let isFirstFrame = true;
+        let isFirstFrame = false;
         
         const frame = () => {
             // 绗竴甯ф椂纭繚鐩告満浣嶇疆姝ｇ‘锛圤rbitControls鍙兘鍦ㄥ垵濮嬪寲鏃惰鐩栦簡浣嶇疆锛?
             if (isFirstFrame) {
                 isFirstFrame = false;
-                const initDist = DEFAULT_INIT_CAMERA_DISTANCE;
+                const initDist = getRecommendedInitialCameraDistance();
                 camera.position.x = 0;
                 camera.position.y = 0;
                 camera.position.z = -initDist;
                 cameraParams.azimuth = 0;
                 cameraParams.elevation = 0;
-                cameraParams.distance = 5; // 榛樿缂╂斁涓?
+                cameraParams.distance = DEFAULT_CAMERA_DISTANCE; // 榛樿缂╂斁涓?
             }
             
             if (customOrbitEnabled) updateCameraFromOrbit();
@@ -861,22 +1266,24 @@ function initViewer() {
             }
             
             // 鏇存柊鐩告満浣嶇疆鏄剧ず
-            updateCameraPosDisplay();
+            const params = calculateCameraParams();
+            const frameNow = performance.now();
+            maybeRefreshCameraUi(params, frameNow);
             
             // 鏇存柊鐩告満鍙傛暟鏄剧ず锛堟柟浣嶈銆佷话瑙掋€佺缉鏀撅級
-            updateCameraParamsDisplay();
             
             // 姣?甯у悓姝ヤ竴娆″埌3D鎺у埗闈㈡澘锛堣妭娴侊級
-            syncFrameCount++;
-            if (syncFrameCount >= 5) {
-                syncFrameCount = 0;
-                syncViewerToCameraPanel();
-            }
+            maybeSyncViewerCameraPanel(params, frameNow);
             
-            // Always draw gizmo when in transform mode with selection
-            if ((currentTool === 'translate' || currentTool === 'rotate') && selectedIndices.size > 0) {
+            const shouldDrawTransformGizmo = (currentTool === 'translate' || currentTool === 'rotate') && selectedIndices.size > 0;
+            const shouldDrawOverlay = shouldDrawTransformGizmo || hasActiveOrbitCenterFeedback();
+            if (shouldDrawTransformGizmo) {
                 updateGizmoScreenPosition();
+            }
+            if (shouldDrawOverlay) {
                 drawGizmo();
+            } else {
+                clearGizmo();
             }
             requestAnimationFrame(frame);
         };
@@ -918,7 +1325,7 @@ function setupCustomOrbitControls() {
             orbitPitch = Math.max(-Math.PI / 2 + 0.1, Math.min(Math.PI / 2 - 0.1, orbitPitch));
         } else if (customOrbitButton === 2) {
             // 鍙抽敭鎷栧姩锛氬钩绉昏鍥撅紝鍚屾椂鏇存柊orbitTarget锛堜腑蹇冪偣锛?
-            const panSpeed = orbitDistance * 0.002;
+            const panSpeed = orbitDistance * CUSTOM_ORBIT_PAN_DISTANCE_FACTOR;
             const panX = dx * panSpeed;
             const panY = dy * panSpeed;
             
@@ -944,7 +1351,7 @@ function setupCustomOrbitControls() {
         // 鎸変綇Shift鏃跺噺閫?.5鍊?
         const speedMultiplier = e.shiftKey ? 0.0005 : 0.001;
         orbitDistance += e.deltaY * orbitDistance * speedMultiplier;
-        orbitDistance = Math.max(0.2, Math.min(100, orbitDistance));
+        orbitDistance = Math.max(MIN_CONTINUOUS_ZOOM_DISTANCE, orbitDistance);
     }, true);
     
     canvas.addEventListener('contextmenu', (e) => { if (customOrbitEnabled) e.preventDefault(); }, true);
@@ -992,13 +1399,14 @@ function setupVirtualOrbitBall() {
         virtualOrbitBall.lastMouseY = e.clientY;
         
         // 绔嬪嵆鍚屾鍒?D鐩告満鎺у埗闈㈡澘
-        updateCameraParamsDisplay();
-        syncViewerToCameraPanel();
     }, true);
     
     window.addEventListener('mouseup', (e) => {
         if (e.button === 0) {
             virtualOrbitBall.isDragging = false;
+            const params = calculateCameraParams();
+            forceRefreshCameraUi(params);
+            forceSyncViewerCameraPanel(params);
         }
     }, true);
     
@@ -1013,7 +1421,7 @@ function setupVirtualOrbitBall() {
 function resetVirtualOrbitBall() {
     virtualOrbitBall.yaw = virtualOrbitBall.initialYaw;
     virtualOrbitBall.pitch = virtualOrbitBall.initialPitch;
-    cameraParams.distance = 5;
+    cameraParams.distance = DEFAULT_CAMERA_DISTANCE;
 }
 
 function setupToolbar() {
@@ -1235,12 +1643,42 @@ function setAspectRatio(aspect) {
     updateRenderFrame();
 }
 
-function updateCameraPosDisplay() {
+function isKnownAspectRatio(aspect) {
+    return typeof aspect === 'string' && (
+        aspect === 'original'
+        || Object.prototype.hasOwnProperty.call(aspectRatios, aspect)
+    );
+}
+
+function applyAspectState(aspect, width, height) {
+    if (isKnownAspectRatio(aspect)) {
+        setAspectRatio(aspect);
+        return true;
+    }
+
+    const nextWidth = Number(width);
+    const nextHeight = Number(height);
+    if (!Number.isFinite(nextWidth) || nextWidth <= 0 || !Number.isFinite(nextHeight) || nextHeight <= 0) {
+        return false;
+    }
+
+    currentAspectRatio = 'custom';
+    outputWidth = Math.round(nextWidth);
+    outputHeight = Math.round(nextHeight);
+    if (aspectBtn) aspectBtn.textContent = `${outputWidth}x${outputHeight} ▼`;
+    aspectOptions.forEach((opt) => {
+        opt.classList.remove('selected');
+    });
+    updateRenderFrame();
+    return true;
+}
+
+function updateCameraPosDisplay(params = null) {
     // 鏄剧ず鐩告満瑙掑害鍙傛暟鑰屼笉鏄綅缃潗鏍?
     // Y = 鏂逛綅瑙掞紙azimuth锛?-360搴︼紝姘村钩鏃嬭浆
     // X = 浠拌锛坋levation锛?30鍒?0搴︼紝淇话瑙?
     // Z = 缂╂斁璺濈宸插彇娑堟樉绀猴紝鏀逛负鎵嬪姩杈撳叆鎺у埗
-    const params = calculateCameraParams();
+    params = params || calculateCameraParams();
     if (params && cameraPosDisplay) {
         const x = Math.round(params.elevation) + '°';   // 浠拌锛堜刊浠帮紝X杞达級
         const y = Math.round(params.azimuth) + '°';     // 鏂逛綅瑙掞紙姘村钩锛孻杞达級
@@ -1273,7 +1711,6 @@ function calculateCameraParams() {
         const result = CT.GSplatAdapter.fromGSplatPosition(px, py, pz, target);
         cameraParams.azimuth = Math.round(result.azimuth);
         cameraParams.elevation = Math.round(result.elevation);
-        cameraParams.distance = result.zoom;
     }
 
     // Keep roll as an explicit user-controlled value.
@@ -1361,6 +1798,44 @@ function getSplatCenter() {
 /**
  * 鑾峰彇鍦烘櫙鍗婂緞锛堢敤浜庤窛绂诲綊涓€鍖栵級
  */
+function getSceneBoundsSize() {
+    if (currentSplat?.bounds) {
+        const size = currentSplat.bounds.size();
+        return {
+            x: Math.abs(Number(size.x) || 0),
+            y: Math.abs(Number(size.y) || 0),
+            z: Math.abs(Number(size.z) || 0),
+        };
+    }
+
+    if (!currentSplat?.data?.positions) {
+        return null;
+    }
+
+    const positions = currentSplat.data.positions;
+    const count = positions.length / 3;
+    if (count === 0) return null;
+
+    let minX = Infinity, maxX = -Infinity;
+    let minY = Infinity, maxY = -Infinity;
+    let minZ = Infinity, maxZ = -Infinity;
+
+    for (let i = 0; i < count; i++) {
+        const x = positions[i * 3];
+        const y = positions[i * 3 + 1];
+        const z = positions[i * 3 + 2];
+        minX = Math.min(minX, x); maxX = Math.max(maxX, x);
+        minY = Math.min(minY, y); maxY = Math.max(maxY, y);
+        minZ = Math.min(minZ, z); maxZ = Math.max(maxZ, z);
+    }
+
+    return {
+        x: maxX - minX,
+        y: maxY - minY,
+        z: maxZ - minZ,
+    };
+}
+
 function getSceneRadius() {
     if (!currentSplat?.data?.positions) {
         return 5;  // 榛樿鍊?
@@ -1395,6 +1870,41 @@ function getSceneRadius() {
     const sizeZ = maxZ - minZ;
     
     return Math.max(sizeX, sizeY, sizeZ) / 2 || 5;
+}
+
+function getRecommendedInitialCameraDistance() {
+    const size = getSceneBoundsSize();
+    if (!size) {
+        return DEFAULT_INIT_CAMERA_DISTANCE;
+    }
+
+    const viewportWidth = Math.max(canvas?.clientWidth || originalOutputWidth || 512, 1);
+    const viewportHeight = Math.max(canvas?.clientHeight || originalOutputHeight || 512, 1);
+    const fx = Number(camera?.data?.fx);
+    const fy = Number(camera?.data?.fy);
+    const halfX = Math.max(size.x, 0) * 0.5;
+    const halfY = Math.max(size.y, 0) * 0.5;
+    const halfZ = Math.max(size.z, 0) * 0.5;
+
+    let fitDistance = 0;
+    if (Number.isFinite(fx) && fx > 1e-6) {
+        fitDistance = Math.max(fitDistance, (halfX * fx) / Math.max(viewportWidth * 0.5, 1));
+    }
+    if (Number.isFinite(fy) && fy > 1e-6) {
+        fitDistance = Math.max(fitDistance, (halfY * fy) / Math.max(viewportHeight * 0.5, 1));
+    }
+
+    const sceneRadius = Number(getSceneRadius());
+    if (Number.isFinite(sceneRadius) && sceneRadius > 0) {
+        fitDistance = Math.max(fitDistance, sceneRadius * 1.15);
+    }
+
+    fitDistance = (fitDistance + halfZ) * INITIAL_CAMERA_DISTANCE_MARGIN;
+    if (!Number.isFinite(fitDistance) || fitDistance <= 0) {
+        return DEFAULT_INIT_CAMERA_DISTANCE;
+    }
+
+    return Math.max(MIN_INIT_CAMERA_DISTANCE, fitDistance);
 }
 
 function getSceneBoundsCenter() {
@@ -1504,11 +2014,33 @@ function getZoomLabel(distance) {
  */
 function getSliderZoom() {
     const v = parseFloat(document.getElementById('zoomInput')?.value ?? document.getElementById('zoomSlider')?.value);
-    return isNaN(v) ? (cameraParams.distance || 5) : v;
+    return isNaN(v) ? (cameraParams.distance || DEFAULT_CAMERA_DISTANCE) : v;
 }
 
-function generateCameraDescription() {
-    const params = calculateCameraParams();
+function getCurrentFocalLengthValue(fallback = initialFocalLength) {
+    const rawValue = parseFloat(focalLengthValue?.value ?? focalLengthSlider?.value);
+    return Number.isFinite(rawValue) ? rawValue : fallback;
+}
+
+function applyFocalLengthToCamera(value, options = {}) {
+    if (!camera) return;
+    const nextValue = Number.isFinite(Number(value)) ? Number(value) : getCurrentFocalLengthValue();
+    const sensorWidth = 36;
+    const canvasWidth = canvas.clientWidth || 512;
+    const focalPx = (canvasWidth * nextValue) / sensorWidth;
+    camera.data.fx = focalPx;
+    camera.data.fy = focalPx;
+    if (typeof camera.update === 'function') {
+        camera.update();
+    }
+    if (options.updateInitialCameraData && initialCameraData) {
+        initialCameraData.fx = focalPx;
+        initialCameraData.fy = focalPx;
+    }
+}
+
+function generateCameraDescription(params = null) {
+    params = params || calculateCameraParams();
     if (!params) return '';
     
     const zoom = getSliderZoom();
@@ -1522,8 +2054,8 @@ function generateCameraDescription() {
 /**
  * 鏇存柊鐩告満鍙傛暟鏄剧ず
  */
-function updateCameraParamsDisplay() {
-    const params = calculateCameraParams();
+function updateCameraParamsDisplay(params = null) {
+    params = params || calculateCameraParams();
     if (!params) return;
     
     const azimuthLabel = getAzimuthLabel(params.azimuth);
@@ -1551,7 +2083,7 @@ function updateCameraParamsDisplay() {
     // 鏇存柊瀹屾暣鎻忚堪
     const descriptionEl = document.getElementById('cameraDescription');
     if (descriptionEl) {
-        descriptionEl.value = generateCameraDescription();
+        descriptionEl.value = generateCameraDescription(params);
     }
 }
 
@@ -1768,21 +2300,59 @@ function clearGizmo() {
     gizmoCtx.clearRect(0, 0, gizmoCanvas.width, gizmoCanvas.height);
 }
 
+function drawOrbitCenterFeedback(now = performance.now()) {
+    if (!hasActiveOrbitCenterFeedback(now)) return;
+    const screen = projectPoint(orbitCenterFeedback.center);
+    if (!screen) return;
+
+    const remaining = Math.max(0, orbitCenterFeedback.expiresAt - now);
+    const t = remaining / ORBIT_CENTER_FEEDBACK_DURATION_MS;
+    const alpha = 0.25 + t * 0.75;
+    const radius = 8 + (1 - t) * 6;
+    const crossRadius = radius + 5;
+
+    gizmoCtx.save();
+    gizmoCtx.globalAlpha = alpha;
+    gizmoCtx.strokeStyle = '#ff3b30';
+    gizmoCtx.fillStyle = '#ff3b30';
+    gizmoCtx.lineWidth = 2.5;
+    gizmoCtx.shadowColor = 'rgba(255, 59, 48, 0.55)';
+    gizmoCtx.shadowBlur = 10;
+
+    gizmoCtx.beginPath();
+    gizmoCtx.arc(screen.x, screen.y, radius, 0, Math.PI * 2);
+    gizmoCtx.stroke();
+
+    gizmoCtx.beginPath();
+    gizmoCtx.arc(screen.x, screen.y, 3.5, 0, Math.PI * 2);
+    gizmoCtx.fill();
+
+    gizmoCtx.beginPath();
+    gizmoCtx.moveTo(screen.x - crossRadius, screen.y);
+    gizmoCtx.lineTo(screen.x + crossRadius, screen.y);
+    gizmoCtx.moveTo(screen.x, screen.y - crossRadius);
+    gizmoCtx.lineTo(screen.x, screen.y + crossRadius);
+    gizmoCtx.stroke();
+
+    gizmoCtx.restore();
+}
+
 function drawGizmo() {
     clearGizmo();
-    if (selectedIndices.size === 0) return;
-    
-    camera.update();
-    const viewMatrix = camera.data.viewMatrix?.buffer;
-    if (!viewMatrix) return;
-    
-    const cx = gizmoScreenPos.x, cy = gizmoScreenPos.y;
-    
-    if (currentTool === 'translate') drawTranslateGizmo(cx, cy, viewMatrix);
-    else if (currentTool === 'rotate') drawRotateGizmo(cx, cy, viewMatrix);
-    
-    // Show transform info during drag
-    if (isDraggingGizmo) {
+    if (selectedIndices.size > 0) {
+        camera.update();
+        const viewMatrix = camera.data.viewMatrix?.buffer;
+        if (!viewMatrix) {
+            drawOrbitCenterFeedback();
+            return;
+        }
+        const cx = gizmoScreenPos.x, cy = gizmoScreenPos.y;
+
+        if (currentTool === 'translate') drawTranslateGizmo(cx, cy, viewMatrix);
+        else if (currentTool === 'rotate') drawRotateGizmo(cx, cy, viewMatrix);
+
+        // Show transform info during drag
+        if (isDraggingGizmo) {
         gizmoCtx.fillStyle = '#fff';
         gizmoCtx.font = 'bold 14px sans-serif';
         gizmoCtx.textAlign = 'center';
@@ -1798,8 +2368,10 @@ function drawGizmo() {
         } else {
             gizmoCtx.fillText(`${axisName} 旋转: ${previewRotationAngle.toFixed(1)}°`, cx, cy - GIZMO_SIZE - 25);
         }
-        gizmoCtx.shadowBlur = 0;
+            gizmoCtx.shadowBlur = 0;
+        }
     }
+    drawOrbitCenterFeedback();
 }
 
 function getScreenAxes(viewMatrix, length) {
@@ -2411,18 +2983,32 @@ function createRotationMatrix(q) {
 
 // ============== Selection & Point Operations ==============
 
-function projectPoint(pos) {
-    if (!camera || !renderer) return null;
+function createProjectionContext() {
+    if (!camera || !canvas) return null;
     camera.update();
     const w = canvas.clientWidth, h = canvas.clientHeight;
-    const fx = camera.data.fx, fy = camera.data.fy;
+    const fx = Number(camera.data?.fx);
+    const fy = Number(camera.data?.fy);
     const m = camera.data.viewMatrix?.buffer;
-    if (!m) return null;
-    const vx = m[0]*pos.x + m[4]*pos.y + m[8]*pos.z + m[12];
-    const vy = m[1]*pos.x + m[5]*pos.y + m[9]*pos.z + m[13];
-    const vz = m[2]*pos.x + m[6]*pos.y + m[10]*pos.z + m[14];
+    if (!m || !Number.isFinite(fx) || !Number.isFinite(fy) || w <= 0 || h <= 0) return null;
+    return { w, h, fx, fy, m };
+}
+
+function projectPointWithContext(x, y, z, projectionContext) {
+    if (!projectionContext) return null;
+    const { w, h, fx, fy, m } = projectionContext;
+    const vx = m[0]*x + m[4]*y + m[8]*z + m[12];
+    const vy = m[1]*x + m[5]*y + m[9]*z + m[13];
+    const vz = m[2]*x + m[6]*y + m[10]*z + m[14];
     if (vz <= 0.01) return null;
     return { x: (vx * fx / vz) + w/2, y: (vy * fy / vz) + h/2, depth: vz };
+}
+
+function projectPoint(pos, projectionContext = null) {
+    if (!pos) return null;
+    const context = projectionContext || createProjectionContext();
+    if (!context) return null;
+    return projectPointWithContext(pos.x, pos.y, pos.z, context);
 }
 
 function selectPointsInRect(x1, y1, x2, y2, add) {
@@ -2636,8 +3222,8 @@ function resetCamera() {
         if (actualParams) {
             cameraParams.azimuth = actualParams.azimuth;
             cameraParams.elevation = actualParams.elevation;
-            cameraParams.distance = actualParams.distance;
         }
+        cameraParams.distance = DEFAULT_CAMERA_DISTANCE;
         cameraParams.roll = 0;
         cameraParams.customOrbitCenter = null;
         cameraParams.orbitCenter = cloneCenter(currentOrbitTarget) || getDefaultOrbitCenter();
@@ -2645,10 +3231,10 @@ function resetCamera() {
     }
     if (rollSlider) rollSlider.value = 0;
     if (rollInput) rollInput.value = 0;
-    lastCameraPositionForParams = null;
+    rememberCurrentCameraPositionForParams();
     
     // 閲嶇疆楂樻柉缂╂斁婊戝潡鍒伴粯璁ゅ€?.3
-    const defaultGaussianScale = 1.0;
+    const defaultGaussianScale = DEFAULT_GAUSSIAN_SCALE;
     if (scaleSlider) scaleSlider.value = defaultGaussianScale;
     if (scaleInput) scaleInput.value = defaultGaussianScale;
     updateGaussianScale(defaultGaussianScale);
@@ -2656,6 +3242,7 @@ function resetCamera() {
     // 閲嶇疆鐒﹁窛婊戝潡鍒板垵濮嬪€?
     focalLengthSlider.value = initialFocalLength;
     focalLengthValue.value = initialFocalLength;
+    updateFocalLength(initialFocalLength);
     // 閲嶇疆娣卞害鑼冨洿婊戝潡鍒板垵濮嬪€?
     depthRangeSlider.value = 5;
     if (depthRangeValue) depthRangeValue.textContent = '全部';
@@ -2674,11 +3261,11 @@ function resetCamera() {
             const zoomSlider = document.getElementById('zoomSlider');
             const zoomInput = document.getElementById('zoomInput');
             if (zoomSlider) {
-                zoomSlider.value = 5;
+                zoomSlider.value = DEFAULT_CAMERA_DISTANCE;
                 zoomSlider.dispatchEvent(new Event('input', { bubbles: true }));
             }
             if (zoomInput) {
-                zoomInput.value = 5;
+                zoomInput.value = DEFAULT_CAMERA_DISTANCE;
                 zoomInput.dispatchEvent(new Event('change', { bubbles: true }));
             }
         }
@@ -2706,7 +3293,9 @@ function areSameHistoryPose(a, b) {
     return Math.abs((Number(a.azimuth) || 0) - (Number(b.azimuth) || 0)) < epsilon
         && Math.abs((Number(a.elevation) || 0) - (Number(b.elevation) || 0)) < epsilon
         && Math.abs((Number(a.distance) || 0) - (Number(b.distance) || 0)) < epsilon
-        && Math.abs((Number(a.roll) || 0) - (Number(b.roll) || 0)) < epsilon;
+        && Math.abs((Number(a.roll) || 0) - (Number(b.roll) || 0)) < epsilon
+        && Math.abs((Number(a.scale) || DEFAULT_GAUSSIAN_SCALE) - (Number(b.scale) || DEFAULT_GAUSSIAN_SCALE)) < epsilon
+        && String(a.aspectRatio || 'original') === String(b.aspectRatio || 'original');
 }
 
 function computeCameraPoseFromView(targetCenter) {
@@ -2738,10 +3327,10 @@ function getCurrentCameraSnapshot() {
     const fallback = calculateCameraParams();
     const azimuth = Number.isFinite(pose?.azimuth) ? pose.azimuth : Number(fallback?.azimuth || 0);
     const elevation = Number.isFinite(pose?.elevation) ? pose.elevation : Number(fallback?.elevation || 0);
-    const distance = Number.isFinite(pose?.distance) ? pose.distance : Number(fallback?.distance || 5);
+    const distance = getSliderZoom();
     const roll = Number(cameraParams?.roll);
     const safeRoll = Number.isFinite(roll) ? roll : 0;
-    const safeDistance = Number.isFinite(distance) ? distance : 5;
+    const safeDistance = Number.isFinite(distance) ? distance : DEFAULT_CAMERA_DISTANCE;
 
     return {
         position: camera ? { x: camera.position.x, y: camera.position.y, z: camera.position.z } : null,
@@ -2749,6 +3338,10 @@ function getCurrentCameraSnapshot() {
         elevation,
         distance: safeDistance,
         roll: safeRoll,
+        scale: Number.isFinite(Number(currentScale)) ? Number(currentScale) : DEFAULT_GAUSSIAN_SCALE,
+        aspectRatio: typeof currentAspectRatio === 'string' && currentAspectRatio.trim() ? currentAspectRatio : 'original',
+        outputWidth: Number.isFinite(Number(outputWidth)) ? Math.round(Number(outputWidth)) : originalOutputWidth,
+        outputHeight: Number.isFinite(Number(outputHeight)) ? Math.round(Number(outputHeight)) : originalOutputHeight,
         description: CT.generateCameraDescription(Math.round(azimuth), Math.round(elevation), safeDistance),
         orbitCenter: cloneCenter(orbitCenter),
         target: cloneCenter(orbitCenter),
@@ -2768,6 +3361,21 @@ function getNextHistorySeq() {
         return cameraHistory.length + 1;
     }
     return Math.floor(maxSeq) + 1;
+}
+
+function resequenceCameraHistory(entries) {
+    if (!Array.isArray(entries)) return [];
+
+    const normalized = entries
+        .filter((entry) => entry && typeof entry === 'object')
+        .map((entry) => ({ ...entry }));
+
+    let nextSeq = 1;
+    for (let index = normalized.length - 1; index >= 0; index -= 1) {
+        normalized[index].seq = nextSeq;
+        nextSeq += 1;
+    }
+    return normalized;
 }
 
 function buildCurrentCameraHistoryEntry() {
@@ -2809,17 +3417,55 @@ window.addCurrentCameraToHistory = function() {
     }
 };
 
+window.deleteCameraHistoryEntry = async function(entry) {
+    const seqRaw = Number(entry?.seq);
+    const seq = Number.isFinite(seqRaw) && seqRaw > 0 ? Math.floor(seqRaw) : null;
+    const nextHistory = seq === null
+        ? cameraHistory.filter((item) => item !== entry)
+        : cameraHistory.filter((item) => Math.floor(Number(item?.seq)) !== seq);
+
+    if (nextHistory.length === cameraHistory.length) {
+        return;
+    }
+
+    const previousHistory = cameraHistory.map((item) => ({ ...item }));
+    cameraHistory = resequenceCameraHistory(nextHistory);
+    renderCameraHistory();
+
+    if (seq === null || typeof nodeId === 'undefined' || nodeId == null) {
+        return;
+    }
+
+    try {
+        const response = await fetch('/gaussian_viewer/delete_history', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                node_id: String(nodeId),
+                seq,
+            }),
+        });
+        const result = await response.json();
+        if (!response.ok || result?.success === false) {
+            throw new Error(result?.error || `HTTP ${response.status}`);
+        }
+
+        if (Array.isArray(result.history)) {
+            cameraHistory = resequenceCameraHistory(result.history.slice(0, HISTORY_MAX_ITEMS));
+            renderCameraHistory();
+        }
+    } catch (e) {
+        console.warn('[GaussianViewer] Failed to delete history entry:', e);
+        cameraHistory = previousHistory;
+        renderCameraHistory();
+    }
+};
+
 function updateFocalLength(value) {
-    if (camera) {
+    applyFocalLengthToCamera(value);
         // 灏嗘憚褰辩劍璺?mm)杞崲涓哄儚绱犵劍璺?
         // 鍋囪浼犳劅鍣ㄥ搴︿负36mm(35mm鑳剁墖鏍囧噯)
         // 鍍忕礌鐒﹁窛 = 鐢诲竷瀹藉害 * 鎽勫奖鐒﹁窛 / 浼犳劅鍣ㄥ搴?
-        const sensorWidth = 36; // mm
-        const canvasWidth = canvas.clientWidth || 512;
-        const focalPx = (canvasWidth * value) / sensorWidth;
-        camera.data.fx = focalPx;
-        camera.data.fy = focalPx;
-    }
 }
 
 function updateDepthRange(value) {
@@ -2887,6 +3533,8 @@ function setCameraFromExtrinsics(ext, intr, splat) {
     if (intr?.length >= 2) {
         const fx = intr[0][0], fy = intr[1][1], icx = intr[0][2], icy = intr[1][2];
         const iw = icx * 2, ih = icy * 2, cw = canvas.clientWidth || 512;
+        camera.data.fx = fx * cw / iw;
+        camera.data.fy = fx * cw / iw;
         gaussianScaleCompensation = iw / cw;
         tz = Math.max(1, fy / ih * 2);
     }
@@ -2894,24 +3542,17 @@ function setCameraFromExtrinsics(ext, intr, splat) {
     if (splat?.bounds) { const c = splat.bounds.center(), s = splat.bounds.size(); tz = c.z; oz = (c.z - s.z/2) * 1.5; }
     cy = -cy;
     // 鏃犲鍙傛椂锛屽垵濮嬩綅缃榻愰粯璁ゆ瑙嗗浘锛坅z=0,el=0,zoom=5锛夛紝纭繚閲嶇疆鐩告満鑳借繕鍘熷埌姝や綅缃?
-    if (!ext?.length) {
-        const fp = { x: tx, y: ty, z: oz - DEFAULT_INIT_CAMERA_DISTANCE };
-        cx = fp.x; cy = fp.y; cz = fp.z;
-    }
-    const baseTarget = { x: tx, y: ty, z: oz };
-    const defaultOrbitCenter = computeDefaultOrbitCenter(
-        { x: cx, y: cy, z: cz },
-        baseTarget
-    );
     initialCameraData = {
         position: { x: cx, y: cy, z: cz },
-        target: new SPLAT.Vector3(defaultOrbitCenter.x, defaultOrbitCenter.y, defaultOrbitCenter.z),
+        target: new SPLAT.Vector3(tx, ty, oz),
         fx: camera.data.fx,
         fy: camera.data.fy
     };
+    applyFocalLengthToCamera(getCurrentFocalLengthValue(initialFocalLength), { updateInitialCameraData: true });
     camera.position.x = cx; camera.position.y = cy; camera.position.z = cz;
-    controls.setCameraTarget(new SPLAT.Vector3(defaultOrbitCenter.x, defaultOrbitCenter.y, defaultOrbitCenter.z));
-    currentOrbitTarget = cloneCenter(defaultOrbitCenter);
+    controls.setCameraTarget(new SPLAT.Vector3(tx, ty, oz));
+    currentOrbitTarget = { x: tx, y: ty, z: oz };
+    cameraParams.targetCenter = cloneCenter(currentOrbitTarget);
     if (!cameraParams.customOrbitCenter) {
         cameraParams.orbitCenter = cloneCenter(currentOrbitTarget);
     }
@@ -2949,7 +3590,7 @@ async function loadPLYFromData(arrayBuffer, filename, ext, intr) {
                 }
             }
             // 鍒濆鍖栭珮鏂缉鏀句负榛樿鍊?.3
-            const defaultScale = 1.0;
+            const defaultScale = DEFAULT_GAUSSIAN_SCALE;
             scaleInput.value = defaultScale; currentScale = defaultScale; scaleSlider.value = defaultScale;
             // 搴旂敤榛樿缂╂斁
             updateGaussianScale(defaultScale);
@@ -2961,7 +3602,7 @@ async function loadPLYFromData(arrayBuffer, filename, ext, intr) {
             // 鏃犲鍙傛棤鍐呭弬锛氱浉鏈烘斁鍦ㄦ柟浣嶈0搴︾殑榛樿浣嶇疆锛坺oom=5锛?
             let targetZ = 0;
             if (currentSplat?.bounds) { targetZ = currentSplat.bounds.center().z; }
-            const fp = { x: 0, y: 0, z: targetZ - DEFAULT_INIT_CAMERA_DISTANCE };
+            const fp = { x: 0, y: 0, z: targetZ - getRecommendedInitialCameraDistance() };
             const baseTarget = { x: 0, y: 0, z: targetZ };
             const defaultOrbitCenter = computeDefaultOrbitCenter(fp, baseTarget);
             const defaultTarget = new SPLAT.Vector3(defaultOrbitCenter.x, defaultOrbitCenter.y, defaultOrbitCenter.z);
@@ -2969,6 +3610,7 @@ async function loadPLYFromData(arrayBuffer, filename, ext, intr) {
             camera.position.x = fp.x; camera.position.y = fp.y; camera.position.z = fp.z;
             controls.setCameraTarget(defaultTarget);
             currentOrbitTarget = cloneCenter(defaultOrbitCenter);
+            cameraParams.targetCenter = cloneCenter(currentOrbitTarget);
             if (!cameraParams.customOrbitCenter) {
                 cameraParams.orbitCenter = cloneCenter(currentOrbitTarget);
             }
@@ -2983,29 +3625,32 @@ async function loadPLYFromData(arrayBuffer, filename, ext, intr) {
         if (!cameraParams.hasCache) {
             cameraParams.azimuth = 0;
             cameraParams.elevation = 0;
-            cameraParams.distance = 5;
+            cameraParams.distance = DEFAULT_CAMERA_DISTANCE;
             cameraParams.roll = 0;
             cameraParams.customOrbitCenter = null;
+            cameraParams.targetCenter = cloneCenter(currentOrbitTarget) || getDefaultOrbitCenter();
             cameraParams.orbitCenter = cloneCenter(currentOrbitTarget) || getDefaultOrbitCenter();
             updateOrbitCenterInputs(cameraParams.orbitCenter);
+            rememberCurrentCameraPositionForParams();
             syncViewerToCameraPanel();
         } else {
             try {
-                syncCameraToViewer(
-                    typeof cameraParams.azimuth === 'number' ? cameraParams.azimuth : 0,
-                    typeof cameraParams.elevation === 'number' ? cameraParams.elevation : 0,
-                    typeof cameraParams.distance === 'number' ? cameraParams.distance : 5,
-                    cameraParams.customOrbitCenter || cameraParams.orbitCenter || null,
-                    typeof cameraParams.roll === 'number' ? cameraParams.roll : 0
-                );
+                if (pendingStartupHistoryEntry) {
+                    applyCameraHistoryEntry(pendingStartupHistoryEntry);
+                } else {
+                    syncCameraToViewer(
+                        typeof cameraParams.azimuth === 'number' ? cameraParams.azimuth : 0,
+                        typeof cameraParams.elevation === 'number' ? cameraParams.elevation : 0,
+                        typeof cameraParams.distance === 'number' ? cameraParams.distance : DEFAULT_CAMERA_DISTANCE,
+                        cameraParams.customOrbitCenter || cameraParams.orbitCenter || null,
+                        typeof cameraParams.roll === 'number' ? cameraParams.roll : 0
+                    );
+                }
             } catch (e) {
-                console.warn('[GaussianViewer] syncCameraToViewer failed in loadPLYFromData:', e);
+                console.warn('[GaussianViewer] Startup camera restore failed in loadPLYFromData:', e);
             }
         }
-
-        if (!cameraParams.hasCache && !cameraParams.customOrbitCenter) {
-            recenterOrbitCenterToScreenCenterNearest({ keepAngles: false, persistAsCustom: false });
-        }
+        pendingStartupHistoryEntry = null;
 
         // Each run starts with full visibility to avoid stale depth clipping from prior sessions.
         if (depthRangeSlider) depthRangeSlider.value = 5;
@@ -3154,36 +3799,26 @@ window.addEventListener('message', (event) => {
         errorEl.classList.add('hidden'); selectedIndices.clear(); setTool('orbit');
 
         // 濡傛灉鍚庣浼犲叆浜嗕笂涓€娆＄殑 camera_state锛屼紭鍏堢敤瀹冨垵濮嬪寲鐩告満鍙傛暟
-        const cachedCameraState = ALWAYS_START_FROM_INITIAL_CAMERA ? null : params?.camera_state;
-        if (cachedCameraState) {
+        const historyFromServer = Array.isArray(params?.camera_history) ? params.camera_history : [];
+        cameraHistory = resequenceCameraHistory(historyFromServer.slice(0, HISTORY_MAX_ITEMS));
+        renderCameraHistory();
+        pendingStartupHistoryEntry = cameraHistory.length > 0
+            ? { ...cameraHistory[0] }
+            : null;
+
+        if (pendingStartupHistoryEntry) {
             try {
-                cameraParams.azimuth = typeof cachedCameraState.azimuth === 'number' ? cachedCameraState.azimuth : 0;
-                cameraParams.elevation = typeof cachedCameraState.elevation === 'number' ? cachedCameraState.elevation : 0;
-                cameraParams.distance = typeof cachedCameraState.distance === 'number' ? cachedCameraState.distance : 5;
-                cameraParams.roll = typeof cachedCameraState.roll === 'number' ? cachedCameraState.roll : 0;
-                cameraParams.orbitCenter = cloneCenter(cachedCameraState.orbitCenter);
-                cameraParams.customOrbitCenter = cloneCenter(cachedCameraState.orbitCenter);
-                cameraParams.hasCache = true;
+                applyCachedCameraState(pendingStartupHistoryEntry);
             } catch (e) {
-                console.warn('[GaussianViewer] Failed to apply cached camera_state:', e);
-                cameraParams.hasCache = false;
+                console.warn('[GaussianViewer] Failed to apply startup history entry:', e);
+                pendingStartupHistoryEntry = null;
+                resetCachedCameraParams();
             }
         } else {
-            cameraParams.azimuth = 0;
-            cameraParams.elevation = 0;
-            cameraParams.distance = 5;
-            cameraParams.roll = 0;
-            cameraParams.orbitCenter = null;
-            cameraParams.customOrbitCenter = null;
-            cameraParams.hasCache = false;
+            resetCachedCameraParams();
         }
         lastCameraPositionForParams = null;
         updateOrbitCenterInputs(cameraParams.customOrbitCenter || cameraParams.orbitCenter || currentOrbitTarget);
-
-        // Initialize history list from backend cache.
-        const historyFromServer = Array.isArray(params?.camera_history) ? params.camera_history : [];
-        cameraHistory = historyFromServer.slice(0, HISTORY_MAX_ITEMS);
-        renderCameraHistory();
 
         loadPLYFromData(data, filename || 'gaussian.ply', extrinsics, intrinsics);
     }
@@ -3197,6 +3832,8 @@ window.addEventListener('message', (event) => {
  * 鏃犲钩绉绘椂涓?currentOrbitTarget 瀹屽叏涓€鑷达紱鏈夊钩绉绘椂閫氳繃 camera.rotation 杩戜技鎺ㄧ畻
  */
 function getOrbitCenter() {
+    const picked = getPickedOrbitCenter();
+    if (picked) return picked;
     const custom = cloneCenter(cameraParams.customOrbitCenter);
     if (custom) return custom;
 
@@ -3237,6 +3874,7 @@ window.syncCameraToViewer = function(azimuth, elevation, zoom, orbitCenter, roll
     
     // 鏇存柊褰撳墠 orbit 涓績璺熻釜锛堜緵 calculateCameraParams / getOrbitCenter 浣跨敤锛?
     currentOrbitTarget = { x: target.x, y: target.y, z: target.z };
+    cameraParams.targetCenter = cloneCenter(currentOrbitTarget);
     cameraParams.orbitCenter = cloneCenter(currentOrbitTarget);
     updateOrbitCenterInputs(currentOrbitTarget);
     
@@ -3263,7 +3901,7 @@ window.syncCameraToViewer = function(azimuth, elevation, zoom, orbitCenter, roll
     cameraParams.elevation = elevation;
     cameraParams.distance = zoom;
     
-    updateCameraParamsDisplay();
+    forceRefreshCameraUi();
     updateStatus();
     
     console.log('[GaussianViewer] Synced from 3D panel:', { azimuth, elevation, zoom, roll: cameraParams.roll, orbitCenter: target });
@@ -3272,8 +3910,8 @@ window.syncCameraToViewer = function(azimuth, elevation, zoom, orbitCenter, roll
 /**
  * 浠?Gaussian Viewer 鍚屾鐩告満鐘舵€佸埌3D鎺у埗闈㈡澘
  */
-function syncViewerToCameraPanel() {
-    const params = calculateCameraParams();
+function syncViewerToCameraPanel(params = null) {
+    params = params || calculateCameraParams();
     if (!params) return;
     
     const isPanningCenter = controlsRightPanDragging || controlsRightPanSyncFrames > 0;
@@ -3307,6 +3945,8 @@ function syncViewerToCameraPanel() {
     // 鏇存柊鏄剧ず
     updateOrbitCenterInputs(getOrbitCenter() || getActiveOrbitCenter());
     updateCameraDisplay(params);
+    lastCameraPanelSignature = getCameraDisplaySignature(params);
+    lastCameraPanelSyncAt = performance.now();
 }
 
 /**
@@ -3342,7 +3982,7 @@ function updateCameraDisplay(params) {
     // 鏇存柊鎻忚堪
     const descOutput = document.getElementById('cameraDescriptionOutput');
     if (descOutput) {
-        descOutput.value = generateCameraDescription();
+        descOutput.value = generateCameraDescription(params);
     }
 }
 
@@ -3394,10 +4034,23 @@ function renderCameraHistory() {
 
         const desc = document.createElement('div');
         desc.className = 'history-desc';
-        desc.textContent = entry.description || '';
+        const aspectLabel = isKnownAspectRatio(entry?.aspectRatio)
+            ? entry.aspectRatio
+            : (
+                Number.isFinite(Number(entry?.outputWidth)) && Number.isFinite(Number(entry?.outputHeight))
+                    ? `${Math.round(Number(entry.outputWidth))}x${Math.round(Number(entry.outputHeight))}`
+                    : ''
+            );
+        const descriptionText = entry.description || '';
+        desc.textContent = aspectLabel
+            ? (descriptionText ? `${descriptionText} | Ratio:${aspectLabel}` : `Ratio:${aspectLabel}`)
+            : descriptionText;
 
         main.appendChild(angles);
         main.appendChild(desc);
+
+        const actions = document.createElement('div');
+        actions.className = 'history-item-actions';
 
         const btn = document.createElement('button');
         btn.className = 'history-restore-btn';
@@ -3406,8 +4059,19 @@ function renderCameraHistory() {
             applyCameraHistoryEntry(entry);
         });
 
+        const deleteBtn = document.createElement('button');
+        deleteBtn.className = 'history-delete-btn';
+        deleteBtn.textContent = 'Del';
+        deleteBtn.title = 'Delete this history shot';
+        deleteBtn.addEventListener('click', () => {
+            window.deleteCameraHistoryEntry(entry);
+        });
+
+        actions.appendChild(btn);
+        actions.appendChild(deleteBtn);
+
         item.appendChild(main);
-        item.appendChild(btn);
+        item.appendChild(actions);
         listEl.appendChild(item);
     });
 }
@@ -3421,12 +4085,18 @@ function applyCameraHistoryEntry(entry) {
     let el = Number.isFinite(elRaw) ? elRaw : 0;
     let dist = Number.isFinite(distRaw) ? distRaw : 5;
     const roll = Number.isFinite(rollRaw) ? rollRaw : 0;
+    const scaleRaw = Number(entry?.scale);
+    const scale = Number.isFinite(scaleRaw) ? scaleRaw : DEFAULT_GAUSSIAN_SCALE;
+    const historyAspectRatio = typeof entry?.aspectRatio === 'string' ? entry.aspectRatio : null;
+    const historyOutputWidth = Number(entry?.outputWidth);
+    const historyOutputHeight = Number(entry?.outputHeight);
 
     const target = cloneCenter(entry?.orbitCenter)
         || cloneCenter(entry?.target)
         || cloneCenter(getOrbitCenter())
         || getDefaultOrbitCenter();
     const position = cloneCenter(entry?.position);
+    applyAspectState(historyAspectRatio, historyOutputWidth, historyOutputHeight);
 
     // Ensure OrbitControls path is active.
     customOrbitEnabled = false;
@@ -3436,6 +4106,7 @@ function applyCameraHistoryEntry(entry) {
     if (camera && controls && target && position) {
         cameraParams.roll = roll;
         cameraParams.customOrbitCenter = cloneCenter(target);
+        cameraParams.targetCenter = cloneCenter(target);
         cameraParams.orbitCenter = cloneCenter(target);
         currentOrbitTarget = cloneCenter(target);
         updateOrbitCenterInputs(target);
@@ -3457,8 +4128,9 @@ function applyCameraHistoryEntry(entry) {
         const recalculated = calculateCameraParams();
         cameraParams.azimuth = Number.isFinite(recalculated?.azimuth) ? recalculated.azimuth : az;
         cameraParams.elevation = Number.isFinite(recalculated?.elevation) ? recalculated.elevation : el;
-        cameraParams.distance = Number.isFinite(recalculated?.distance) ? recalculated.distance : dist;
+        cameraParams.distance = dist;
         cameraParams.roll = roll;
+        updateGaussianScale(scale);
 
         syncViewerToCameraPanel();
         updateStatus();
@@ -3472,10 +4144,8 @@ function applyCameraHistoryEntry(entry) {
             if (precise) {
                 const pAz = Number(precise.azimuth);
                 const pEl = Number(precise.elevation);
-                const pDist = Number(precise.zoom);
                 if (Number.isFinite(pAz)) az = pAz;
                 if (Number.isFinite(pEl)) el = pEl;
-                if (Number.isFinite(pDist)) dist = pDist;
             }
         } catch (e) {
             console.warn('[GaussianViewer] Failed to derive precise restore pose:', e);
@@ -3487,6 +4157,7 @@ function applyCameraHistoryEntry(entry) {
     cameraParams.distance = dist;
     cameraParams.roll = roll;
     syncCameraToViewer(az, el, dist, target || null, roll);
+    updateGaussianScale(scale);
 
     const zoomSlider = document.getElementById('zoomSlider');
     const zoomInput = document.getElementById('zoomInput');

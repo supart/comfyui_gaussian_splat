@@ -27,6 +27,7 @@ CANCELLED_NODES = set()
 #   "node:{node_id}"    -> last camera_state dict
 #   "ply:{ply_path}"    -> last camera_state dict
 #   "history:{node_id}" -> list[dict] of camera_state snapshots (recent first)
+#   "input:{node_id}"   -> dict describing the last loaded gaussian input
 CAMERA_STATE_CACHE = {}
 MAX_PLY_FILE_SIZE_BYTES = 512 * 1024 * 1024  # 512MB hard cap for in-memory transfer
 MAX_CAMERA_HISTORY_ITEMS = 10
@@ -54,7 +55,19 @@ def _normalize_camera_snapshot(camera_state):
     elevation = _to_float(camera_state.get("elevation"), 0.0)
     distance = _to_float(camera_state.get("distance"), 5.0)
     roll = _to_float(camera_state.get("roll"), 0.0)
+    scale = _to_float(camera_state.get("scale"), 0.3)
     seq = _to_int(camera_state.get("seq"), None)
+    aspect_ratio = camera_state.get("aspectRatio")
+    if isinstance(aspect_ratio, str):
+        aspect_ratio = aspect_ratio.strip() or "original"
+    else:
+        aspect_ratio = "original"
+    output_width = _to_int(camera_state.get("outputWidth"), None)
+    output_height = _to_int(camera_state.get("outputHeight"), None)
+    if output_width is not None and output_width <= 0:
+        output_width = None
+    if output_height is not None and output_height <= 0:
+        output_height = None
 
     description = camera_state.get("description") or generate_camera_description(
         azimuth, elevation, distance
@@ -68,6 +81,10 @@ def _normalize_camera_snapshot(camera_state):
         "elevation": elevation,
         "distance": distance,
         "roll": roll,
+        "scale": scale,
+        "aspectRatio": aspect_ratio,
+        "outputWidth": output_width,
+        "outputHeight": output_height,
         "description": description,
         "timestamp": time.time(),
         "position": position,
@@ -88,7 +105,104 @@ def _is_same_pose(a, b):
         and abs(_to_float(a.get("elevation"), 0.0) - _to_float(b.get("elevation"), 0.0)) < epsilon
         and abs(_to_float(a.get("distance"), 5.0) - _to_float(b.get("distance"), 5.0)) < epsilon
         and abs(_to_float(a.get("roll"), 0.0) - _to_float(b.get("roll"), 0.0)) < epsilon
+        and abs(_to_float(a.get("scale"), 0.3) - _to_float(b.get("scale"), 0.3)) < epsilon
+        and str(a.get("aspectRatio") or "original") == str(b.get("aspectRatio") or "original")
     )
+
+
+def _normalize_ply_cache_path(ply_path):
+    if ply_path in (None, ""):
+        return None
+    try:
+        return _safe_realpath(str(ply_path))
+    except Exception:
+        return str(ply_path)
+
+
+def _iter_ply_cache_keys(ply_path):
+    normalized_path = _normalize_ply_cache_path(ply_path)
+    if not normalized_path:
+        return []
+
+    cache_keys = [f"ply:{normalized_path}"]
+    raw_path = str(ply_path)
+    raw_key = f"ply:{raw_path}"
+    if raw_key not in cache_keys:
+        cache_keys.append(raw_key)
+    return cache_keys
+
+
+def _build_gaussian_input_signature(ply_path):
+    normalized_path = _normalize_ply_cache_path(ply_path)
+    if not normalized_path:
+        return None
+
+    signature = {
+        "path": normalized_path,
+    }
+
+    try:
+        stat_result = os.stat(normalized_path)
+        signature["size"] = int(stat_result.st_size)
+        signature["mtime_ns"] = int(
+            getattr(stat_result, "st_mtime_ns", int(stat_result.st_mtime * 1_000_000_000))
+        )
+    except OSError:
+        pass
+
+    return signature
+
+
+def _normalize_input_signature(signature):
+    if isinstance(signature, dict):
+        normalized_path = _normalize_ply_cache_path(
+            signature.get("path") or signature.get("ply_path")
+        )
+        if not normalized_path:
+            return None
+
+        normalized = {"path": normalized_path}
+        size = _to_int(signature.get("size"), None)
+        if size is not None and size >= 0:
+            normalized["size"] = size
+        mtime_ns = _to_int(signature.get("mtime_ns"), None)
+        if mtime_ns is not None and mtime_ns >= 0:
+            normalized["mtime_ns"] = mtime_ns
+        return normalized
+
+    normalized_path = _normalize_ply_cache_path(signature)
+    if not normalized_path:
+        return None
+    return {"path": normalized_path}
+
+
+def _did_gaussian_input_change(previous_signature, current_signature):
+    previous = _normalize_input_signature(previous_signature)
+    current = _normalize_input_signature(current_signature)
+    if previous is None or current is None:
+        return False
+    return previous != current
+
+
+def _get_input_signature_path(signature):
+    normalized = _normalize_input_signature(signature)
+    if not normalized:
+        return None
+    return normalized.get("path")
+
+
+def _clear_cached_camera_state(str_key, ply_paths=None, clear_input_signature=False):
+    CAMERA_STATE_CACHE.pop(f"node:{str_key}", None)
+    CAMERA_STATE_CACHE.pop(f"history:{str_key}", None)
+    if clear_input_signature:
+        CAMERA_STATE_CACHE.pop(f"input:{str_key}", None)
+
+    if not ply_paths:
+        return
+
+    for ply_path in ply_paths:
+        for cache_key in _iter_ply_cache_keys(ply_path):
+            CAMERA_STATE_CACHE.pop(cache_key, None)
 
 
 def _cache_last_camera_state(str_key, snapshot, params):
@@ -96,8 +210,8 @@ def _cache_last_camera_state(str_key, snapshot, params):
         return
     CAMERA_STATE_CACHE[f"node:{str_key}"] = snapshot
     ply_path = params.get("ply_path") or params.get("filename")
-    if ply_path:
-        CAMERA_STATE_CACHE[f"ply:{ply_path}"] = snapshot
+    for cache_key in _iter_ply_cache_keys(ply_path):
+        CAMERA_STATE_CACHE[cache_key] = snapshot
 
 
 def _append_camera_history(str_key, snapshot):
@@ -125,6 +239,46 @@ def _append_camera_history(str_key, snapshot):
         history = history[:MAX_CAMERA_HISTORY_ITEMS]
     CAMERA_STATE_CACHE[history_key] = history
     return history
+
+
+def _resequence_camera_history(history):
+    if not isinstance(history, list):
+        return []
+
+    normalized = [dict(item) for item in history if isinstance(item, dict)]
+    normalized.reverse()
+    for index, item in enumerate(normalized, start=1):
+        item["seq"] = index
+    normalized.reverse()
+    return normalized
+
+
+def _remove_camera_history_entry(str_key, seq):
+    history_key = f"history:{str_key}"
+    history = CAMERA_STATE_CACHE.get(history_key, [])
+    if not isinstance(history, list):
+        history = []
+
+    seq = _to_int(seq, None)
+    if seq is None or seq <= 0:
+        return history, False
+
+    filtered = []
+    removed = False
+    for item in history:
+        item_seq = _to_int(item.get("seq"), None) if isinstance(item, dict) else None
+        if not removed and item_seq == seq:
+            removed = True
+            continue
+        filtered.append(item)
+
+    filtered = _resequence_camera_history(filtered)
+    if filtered:
+        CAMERA_STATE_CACHE[history_key] = filtered
+    else:
+        CAMERA_STATE_CACHE.pop(history_key, None)
+
+    return filtered, removed
 
 
 def _safe_realpath(path):
@@ -443,14 +597,44 @@ class GaussianViewerSelect:
         if node_id in CANCELLED_NODES:
             CANCELLED_NODES.discard(node_id)
 
+        current_input_signature = _build_gaussian_input_signature(ply_path)
+        input_signature_key = f"input:{node_id}" if node_id else None
+        previous_input_signature = (
+            CAMERA_STATE_CACHE.get(input_signature_key) if input_signature_key else None
+        )
+        input_changed = False
+
+        if input_signature_key:
+            input_changed = _did_gaussian_input_change(
+                previous_input_signature, current_input_signature
+            )
+            if input_changed:
+                previous_input_path = _get_input_signature_path(previous_input_signature)
+                print(
+                    f"[GaussianViewer] Gaussian input changed for node {node_id}, "
+                    f"clearing cached camera state and history"
+                )
+                _clear_cached_camera_state(
+                    node_id,
+                    ply_paths=[previous_input_path, ply_path],
+                    clear_input_signature=False,
+                )
+
+            if current_input_signature is not None:
+                CAMERA_STATE_CACHE[input_signature_key] = current_input_signature
+            else:
+                CAMERA_STATE_CACHE.pop(input_signature_key, None)
+
         # Look up cached camera state, prefer node-specific, fall back to ply_path
         cached_camera_state = None
         cache_key_node = f"node:{node_id}" if node_id else None
-        cache_key_ply = f"ply:{ply_path}" if ply_path else None
-        if cache_key_node and cache_key_node in CAMERA_STATE_CACHE:
+        if not input_changed and cache_key_node and cache_key_node in CAMERA_STATE_CACHE:
             cached_camera_state = CAMERA_STATE_CACHE[cache_key_node]
-        elif cache_key_ply and cache_key_ply in CAMERA_STATE_CACHE:
-            cached_camera_state = CAMERA_STATE_CACHE[cache_key_ply]
+        elif not input_changed:
+            for cache_key_ply in _iter_ply_cache_keys(ply_path):
+                if cache_key_ply in CAMERA_STATE_CACHE:
+                    cached_camera_state = CAMERA_STATE_CACHE[cache_key_ply]
+                    break
 
         WAITING_NODES[node_id] = {
             "ply_path": ply_path,
@@ -578,6 +762,25 @@ async def gaussian_add_history(request):
     return web.json_response({"success": True, "history_count": len(history)})
 
 
+@PromptServer.instance.routes.post("/gaussian_viewer/delete_history")
+async def gaussian_delete_history(request):
+    """Delete one camera snapshot from per-node history by sequence id."""
+    data = await request.json()
+    node_id = data.get("node_id")
+    str_key = str(node_id)
+
+    history, removed = _remove_camera_history_entry(str_key, data.get("seq"))
+    if not removed:
+        return web.json_response(
+            {"success": False, "error": "History entry not found", "history": history},
+            status=404,
+        )
+
+    return web.json_response(
+        {"success": True, "history_count": len(history), "history": history}
+    )
+
+
 @PromptServer.instance.routes.post("/gaussian_viewer/cache_camera_state")
 async def gaussian_cache_camera_state(request):
     """Cache latest camera state without confirming selection."""
@@ -653,19 +856,23 @@ async def gaussian_reset(request):
 
     print(f"[GaussianViewer] Reset requested for node: {str_key}")
 
-    node_key = f"node:{str_key}"
-    history_key = f"history:{str_key}"
-
-    # Remove node-specific cache
-    CAMERA_STATE_CACHE.pop(node_key, None)
-    CAMERA_STATE_CACHE.pop(history_key, None)
-
-    # Optionally also clear ply-based cache if we can resolve ply_path from WAITING_NODES
+    ply_paths_to_clear = []
     waiting = WAITING_NODES.get(str_key)
     if waiting:
         ply_path = waiting.get("ply_path")
         if ply_path:
-            CAMERA_STATE_CACHE.pop(f"ply:{ply_path}", None)
+            ply_paths_to_clear.append(ply_path)
+
+    previous_input_signature = CAMERA_STATE_CACHE.get(f"input:{str_key}")
+    previous_input_path = _get_input_signature_path(previous_input_signature)
+    if previous_input_path:
+        ply_paths_to_clear.append(previous_input_path)
+
+    _clear_cached_camera_state(
+        str_key,
+        ply_paths=ply_paths_to_clear,
+        clear_input_signature=True,
+    )
 
     return web.json_response({"success": True})
 

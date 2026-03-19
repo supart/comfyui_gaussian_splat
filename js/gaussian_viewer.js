@@ -293,9 +293,10 @@ function showGlobalViewer(nodeId, data) {
         })
         .then(arrayBuffer => {
             console.log("[GaussianViewer] Loaded PLY, size:", arrayBuffer.byteLength);
-            const node = app.graph.getNodeById(parseInt(nodeId));
-            const fallbackCameraState = node?.viewerParams?.camera_state || null;
-            const fallbackCameraHistory = node?.viewerParams?.camera_history || null;
+            const backendCameraState = data.camera_state ?? null;
+            const backendCameraHistory = Array.isArray(data.camera_history)
+                ? data.camera_history
+                : null;
 
             const fx = Math.max(data.width, data.height);
             const intrinsics = [
@@ -316,9 +317,9 @@ function showGlobalViewer(nodeId, data) {
                     height: data.height,
                     background: data.background,
                     point_size: data.point_size,
-                    // pass through cached camera state & history from backend if present
-                    camera_state: data.camera_state || fallbackCameraState,
-                    camera_history: data.camera_history || fallbackCameraHistory,
+                    // Always trust backend startup state so input changes can fully reset.
+                    camera_state: backendCameraState,
+                    camera_history: backendCameraHistory,
                 },
                 timestamp: Date.now()
             }, TARGET_ORIGIN, [arrayBuffer]);
@@ -351,15 +352,14 @@ api.addEventListener("gaussian_viewer_show", (event) => {
     
     const node = app.graph.getNodeById(parseInt(nodeId));
     if (node) {
-        const prev = node.viewerParams || {};
         node.viewerParams = {
             width: data.width,
             height: data.height,
             background: data.background,
             point_size: data.point_size,
             ply_path: data.ply_path,
-            camera_state: data.camera_state || prev.camera_state || null,
-            camera_history: data.camera_history || prev.camera_history || null,
+            camera_state: data.camera_state ?? null,
+            camera_history: Array.isArray(data.camera_history) ? data.camera_history : null,
         };
         showGlobalViewer(nodeId, data);
     }

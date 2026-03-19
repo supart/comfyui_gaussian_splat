@@ -219,8 +219,10 @@ const CoordinateTransform = (function() {
         const direction = getAzimuthLabel(azimuth);
         const elevationLabel = getElevationLabel(elevation);
         const shotType = getZoomLabel(zoom);
-        
-        return `${direction}, ${elevationLabel}, ${shotType} (horizontal: ${Math.round(azimuth)}, vertical: ${Math.round(elevation)}, zoom: ${Math.round(zoom)})`;
+
+        const zoomValue = Number(zoom);
+        const zoomText = Number.isFinite(zoomValue) ? zoomValue.toFixed(1) : '0.0';
+        return `${direction}, ${elevationLabel}, ${shotType} (horizontal: ${Math.round(azimuth)}, vertical: ${Math.round(elevation)}, zoom: ${zoomText})`;
     }
 
     // ==================== GSplat Adapter ====================

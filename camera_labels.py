@@ -61,7 +61,10 @@ def generate_camera_description(horizontal_angle, vertical_angle, zoom):
     direction = get_azimuth_label(horizontal_angle)
     elevation = get_elevation_label(vertical_angle)
     shot_type = get_zoom_label(zoom)
+    horizontal_text = str(int(round(float(horizontal_angle))))
+    vertical_text = str(int(round(float(vertical_angle))))
+    zoom_text = f"{float(zoom):.1f}"
     return (
         f"{direction}, {elevation}, {shot_type} "
-        f"(horizontal: {horizontal_angle}, vertical: {vertical_angle}, zoom: {zoom})"
+        f"(horizontal: {horizontal_text}, vertical: {vertical_text}, zoom: {zoom_text})"
     )

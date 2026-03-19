@@ -56,11 +56,17 @@ function formatPromptNumber(value) {
     return n.toFixed(1);
 }
 
+function formatPromptAngle(value) {
+    const n = Number(value);
+    if (!Number.isFinite(n)) return "0";
+    return String(Math.round(n));
+}
+
 function generatePromptDescription(azimuth, elevation, zoom) {
     const direction = getAzimuthLabel(azimuth);
     const elevationLabel = getElevationLabel(elevation);
     const shotType = getZoomLabel(zoom);
-    return `${direction}, ${elevationLabel}, ${shotType} (horizontal: ${formatPromptNumber(azimuth)}, vertical: ${formatPromptNumber(elevation)}, zoom: ${formatPromptNumber(zoom)})`;
+    return `${direction}, ${elevationLabel}, ${shotType} (horizontal: ${formatPromptAngle(azimuth)}, vertical: ${formatPromptAngle(elevation)}, zoom: ${formatPromptNumber(zoom)})`;
 }
 
 function drawWrappedText(ctx, text, x, y, maxWidth, lineHeight, maxLines = 3) {

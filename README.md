@@ -4,7 +4,16 @@ ComfyUI custom nodes for Gaussian viewer interaction and camera pose prompt cont
 
 ## Version
 
-- Current version: `0.3.0`
+- Current version: `0.4.0`
+
+## 0.4.0 Highlights
+
+- Camera history now keeps more of the real shot state, including zoom and aspect ratio.
+- History panel supports deleting a single saved shot directly in the viewer.
+- Reopen / cancel flow restores the last cached camera pose more reliably.
+- Orbit-center interaction was refined so left-click pivot picking feels steadier during rotation.
+- Manual `Zoom` output is now separated from mouse-wheel camera zoom, so prompt values stay predictable.
+- Startup and reset camera behavior were aligned to avoid first-scroll white-screen jumps.
 
 ## Features
 

@@ -2,6 +2,20 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.4.0] - 2026-03-20
+
+### Changed
+
+- Bumped plugin version metadata to `0.4.0`.
+- Restored cached camera pose on reopen/cancel flow so viewer state now matches the documented behavior.
+- Improved camera history so saved shots keep zoom, aspect ratio, and can be restored more reliably.
+- Added per-shot delete action in the history panel for faster cleanup during iteration.
+- Separated manual `Zoom` output from mouse-wheel camera zoom so prompt values and real viewport distance no longer fight each other.
+- Refined orbit-center picking and rotation behavior to reduce drift, remove pivot-jump on left-click, and keep the chosen center stable while dragging.
+- Aligned startup and reset camera initialization to avoid the first-scroll white-screen jump after opening the viewer.
+- Adjusted preview output generation to keep the 3D camera preview centered with a square crop.
+- Reduced unnecessary UI / preview panel refresh frequency to improve browser responsiveness during interaction.
+
 ## [0.3.0] - 2026-03-02
 
 ### Added

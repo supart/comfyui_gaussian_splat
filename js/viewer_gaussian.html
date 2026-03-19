@@ -324,6 +324,12 @@
             text-overflow: ellipsis;
         }
 
+        .history-item-actions {
+            display: flex;
+            justify-content: flex-end;
+            gap: 6px;
+        }
+
         .history-restore-btn {
             background: #2a3a2a;
             border: 1px solid #4a4;
@@ -332,11 +338,25 @@
             border-radius: 3px;
             cursor: pointer;
             font-size: 10px;
-            align-self: flex-end;
         }
 
         .history-restore-btn:hover {
             background: #3a5a3a;
+        }
+
+        .history-delete-btn {
+            background: #3a2328;
+            border: 1px solid #8a4a58;
+            color: #ff9db0;
+            padding: 3px 6px;
+            border-radius: 3px;
+            cursor: pointer;
+            font-size: 10px;
+        }
+
+        .history-delete-btn:hover {
+            background: #5a2a32;
+            border-color: #ff9db0;
         }
         
         /* Toolbar */
@@ -420,6 +440,27 @@
             background: linear-gradient(180deg, #2a2a2a 0%, #222 100%);
             padding: 10px 16px;
             border-top: 1px solid #333;
+        }
+
+        .usage-guide {
+            margin-top: 10px;
+            padding: 10px 12px;
+            border: 1px solid #3a3a3a;
+            border-radius: 8px;
+            background: rgba(20, 20, 28, 0.9);
+        }
+
+        .usage-guide-title {
+            color: #E93D82;
+            font-size: 11px;
+            font-weight: 600;
+            margin-bottom: 6px;
+        }
+
+        .usage-guide-text {
+            color: #b8b8c8;
+            font-size: 11px;
+            line-height: 1.6;
         }
         
         .controls-row {
@@ -692,13 +733,13 @@
         <div class="controls-row">
             <div class="control-group">
                 <span>缩放:</span>
-                <input type="range" id="gaussianScaleSlider" min="0.1" max="4" step="0.1" value="1.0">
-                <input type="number" id="gaussianScaleValue" min="0.1" max="4" step="0.1" value="1.0">
+                <input type="range" id="gaussianScaleSlider" min="0.1" max="4" step="0.1" value="0.3">
+                <input type="number" id="gaussianScaleValue" min="0.1" max="4" step="0.1" value="0.3">
             </div>
             <div class="control-group">
                 <span>焦距:</span>
-                <input type="range" id="focalLengthSlider" min="12" max="150" step="1" value="22">
-                <input type="number" id="focalLengthValue" min="12" max="150" step="1" value="22">
+<input type="range" id="focalLengthSlider" min="12" max="150" step="1" value="16">
+<input type="number" id="focalLengthValue" min="12" max="150" step="1" value="16">
             </div>
             <div class="control-group">
                 <span>视图裁切:</span>
@@ -744,6 +785,13 @@
             <button id="cancelBtn" class="btn-cancel">✕取消</button>
             <button id="confirmBtn" class="btn-confirm">✓确认</button>
         </div>
+        <div class="usage-guide">
+            <div class="usage-guide-title">用法简介</div>
+            <div class="usage-guide-text">
+                左键拖动画面旋转，并自动把点击处设为旋转中心；右键拖动画面平移；滚轮前后移动视角。<br>
+                Pick 可手动指定旋转中心；右侧历史镜头支持保存、还原和删除；重置相机可回到默认视角。
+            </div>
+        </div>
     </div>
     <!-- Three.js for 3D Camera Control -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
@@ -759,6 +807,7 @@
         // ===== 3D Camera Control Scene =====
         let threeScene = null;
         let cameraState = {
+            linkedZoom: 5,   // 3D viewer actual distance for sync only
             azimuth: 0,      // 鏂逛綅瑙掞細0-360搴?
             elevation: 0,    // 浠拌锛?30鍒?0搴?
             zoom: 5,         // 榛樿缂╂斁涓?
@@ -1195,12 +1244,24 @@
                 updatePositions: (az, el, zm, rl) => {
                     cameraState.azimuth = az;
                     cameraState.elevation = el;
+                    if (typeof zm === 'number' && Number.isFinite(zm)) {
+                        cameraState.linkedZoom = zm;
+                    }
                     if (typeof rl === 'number') cameraState.roll = Math.max(-90, Math.min(90, rl));
                     updateVisuals();
                     updateCameraDisplay();
                 },
                 // zoom鍊煎畬鍏ㄦ墜鍔ㄦ帶鍒讹紝涓嶅啀鎻愪緵updateZoomOnly鎺ュ彛
                 updateZoomOnly: (zm) => {
+                    if (typeof zm === 'number' && Number.isFinite(zm)) {
+                        cameraState.zoom = zm;
+                    }
+                    const zoomSlider = document.getElementById('zoomSlider');
+                    const zoomInput = document.getElementById('zoomInput');
+                    if (zoomSlider) zoomSlider.value = cameraState.zoom;
+                    if (zoomInput) zoomInput.value = cameraState.zoom;
+                    updateVisuals();
+                    updateCameraDisplay();
                     // 涓嶅啀鑷姩鏇存柊zoom鍊?
                     // cameraState.zoom淇濇寔鐢ㄦ埛鎵嬪姩璁剧疆鐨勫€?
                 },
@@ -1208,13 +1269,16 @@
                 reset: (az, el, zm, rl) => {
                     cameraState.azimuth = az;
                     cameraState.elevation = el;
-                    cameraState.zoom = zm;
+                    if (typeof zm === 'number' && Number.isFinite(zm)) {
+                        cameraState.linkedZoom = zm;
+                    }
+                    cameraState.zoom = 5;
                     cameraState.roll = typeof rl === 'number' ? rl : 0;
                     // 鏇存柊婊戝潡鍜岃緭鍏ユ
                     const zoomSlider = document.getElementById('zoomSlider');
                     const zoomInput = document.getElementById('zoomInput');
-                    if (zoomSlider) zoomSlider.value = zm;
-                    if (zoomInput) zoomInput.value = zm;
+                    if (zoomSlider) zoomSlider.value = cameraState.zoom;
+                    if (zoomInput) zoomInput.value = cameraState.zoom;
                     updateVisuals();
                     updateCameraDisplay();
                 },
@@ -1224,8 +1288,25 @@
                         renderer.render(scene, camera);
                         const src = renderer.domElement;
                         const out = document.createElement('canvas');
-                        out.width = 512; out.height = 512;
-                        out.getContext('2d').drawImage(src, 0, 0, src.width, src.height, 0, 0, 512, 512);
+                        out.width = 512;
+                        out.height = 512;
+                        const ctx = out.getContext('2d');
+                        const cropSize = Math.min(src.width, src.height);
+                        const cropX = Math.max(0, Math.floor((src.width - cropSize) * 0.5));
+                        const cropY = Math.max(0, Math.floor((src.height - cropSize) * 0.5));
+                        ctx.imageSmoothingEnabled = true;
+                        ctx.imageSmoothingQuality = 'high';
+                        ctx.drawImage(
+                            src,
+                            cropX,
+                            cropY,
+                            cropSize,
+                            cropSize,
+                            0,
+                            0,
+                            512,
+                            512
+                        );
                         return out.toDataURL('image/png');
                     } catch (e) {
                         console.warn('[ThreeScene] capture failed:', e);
@@ -1240,7 +1321,10 @@
         // Sync to Gaussian Viewer
         function syncToGaussianViewer() {
             if (window.syncCameraToViewer) {
-                window.syncCameraToViewer(cameraState.azimuth, cameraState.elevation, cameraState.zoom, null, cameraState.roll || 0);
+                const linkedZoom = Number.isFinite(Number(cameraState.linkedZoom))
+                    ? Number(cameraState.linkedZoom)
+                    : 5;
+                window.syncCameraToViewer(cameraState.azimuth, cameraState.elevation, linkedZoom, null, cameraState.roll || 0);
             }
         }
         
@@ -1254,8 +1338,8 @@
                 const value = parseFloat(e.target.value);
                 cameraState.zoom = value;
                 document.getElementById('zoomInput').value = value;
+                if (threeScene) threeScene.updateZoomOnly(value);
                 updateCameraDisplay();
-                if (threeScene) threeScene.updatePositions(cameraState.azimuth, cameraState.elevation, cameraState.zoom);
                 // 涓嶅啀鑷姩鍚屾鍒癎aussian Viewer
             });
             
@@ -1266,8 +1350,8 @@
                 e.target.value = value;
                 cameraState.zoom = value;
                 document.getElementById('zoomSlider').value = value;
+                if (threeScene) threeScene.updateZoomOnly(value);
                 updateCameraDisplay();
-                if (threeScene) threeScene.updatePositions(cameraState.azimuth, cameraState.elevation, cameraState.zoom);
                 // 涓嶅啀鑷姩鍚屾鍒癎aussian Viewer
             });
             
@@ -1289,19 +1373,23 @@
                 cameraState.azimuth = 0;
                 cameraState.elevation = 0;
                 cameraState.zoom = 5;
+                cameraState.linkedZoom = 5;
                 cameraState.roll = 0;
+                if (threeScene) threeScene.updateZoomOnly(cameraState.zoom);
                 updateCameraDisplay();
-                if (threeScene) threeScene.updatePositions(0, 0, 5, 0);
                 
                 // 璋冪敤viewer_editor.js涓殑resetCamera鍑芥暟杩涜瀹屾暣閲嶇疆
+                let didResetViewer = false;
                 if (window.parent && window.parent.resetCamera) {
+                    didResetViewer = true;
                     window.parent.resetCamera();
                 } else if (window.resetCamera) {
+                    didResetViewer = true;
                     window.resetCamera();
                 }
                 
                 // 鍚屾鍒癎aussian Viewer
-                syncToGaussianViewer();
+                if (!didResetViewer) syncToGaussianViewer();
             });
             
             // Clear history button
