@@ -544,6 +544,10 @@ function applyOrbitCenter(nextCenter, options = {}) {
     const next = cloneCenter(nextCenter);
     if (!next) return;
     const { persistAsCustom = true, keepAngles = true, showFeedback = false } = options;
+    const previousTarget = cloneCenter(cameraParams.targetCenter)
+        || cloneCenter(currentOrbitTarget)
+        || cloneCenter(cameraParams.orbitCenter)
+        || getDefaultOrbitCenter();
     const paramsBefore = calculateCameraParams();
 
     if (persistAsCustom) {
@@ -556,15 +560,23 @@ function applyOrbitCenter(nextCenter, options = {}) {
     controls.setCameraTarget(new SPLAT.Vector3(next.x, next.y, next.z));
 
     if (keepAngles && paramsBefore) {
-        const pos = CT.GSplatAdapter.toGSplatPosition(
-            paramsBefore.azimuth,
-            paramsBefore.elevation,
-            paramsBefore.distance,
-            next
-        );
-        camera.position.x = pos.x;
-        camera.position.y = pos.y;
-        camera.position.z = pos.z;
+        // Recenter by translating camera with the same delta as target movement.
+        // This keeps composition stable and makes picked point move to screen center.
+        if (previousTarget) {
+            camera.position.x += (next.x - previousTarget.x);
+            camera.position.y += (next.y - previousTarget.y);
+            camera.position.z += (next.z - previousTarget.z);
+        } else {
+            const pos = CT.GSplatAdapter.toGSplatPosition(
+                paramsBefore.azimuth,
+                paramsBefore.elevation,
+                paramsBefore.distance,
+                next
+            );
+            camera.position.x = pos.x;
+            camera.position.y = pos.y;
+            camera.position.z = pos.z;
+        }
         lastCameraPositionForParams = null;
     }
 
@@ -908,7 +920,12 @@ function setupOrbitCenterInteraction() {
             const rect = canvas.getBoundingClientRect();
             const x = e.clientX - rect.left;
             const y = e.clientY - rect.top;
-            const picked = findNearestVisiblePointAtScreen(x, y);
+            const picked = findNearestVisiblePointAtScreen(
+                x,
+                y,
+                Number.POSITIVE_INFINITY,
+                AUTO_ORBIT_CENTER_SAMPLE_LIMIT
+            );
             if (!picked) {
                 updateStatus();
                 if (statusText) statusText.textContent += ' | no point near cursor';

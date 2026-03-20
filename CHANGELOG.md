@@ -2,6 +2,14 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.4.1] - 2026-03-20
+
+### Fixed
+
+- Bumped plugin version metadata to `0.4.1`.
+- Restored `Pick center: click a gaussian point` so viewer clicks reliably pick a visible gaussian point again.
+- Kept `Pick center` recenter behavior separate from left-click rotate-center logic to avoid cross-regression between the two interaction modes.
+
 ## [0.4.0] - 2026-03-20
 
 ### Changed
