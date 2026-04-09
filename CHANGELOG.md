@@ -2,6 +2,28 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.4.2] - 2026-04-09
+
+### Changed
+
+- Bumped plugin version metadata to `0.4.2`.
+- Split camera outputs so the main camera description stays human-readable while `6DoF` is exported separately.
+- Adjusted viewer keyboard control mapping:
+  - `W/A/S/D` and arrow keys move the camera
+  - `Q/E` move up and down
+  - `R/F` control pitch
+  - removed `Z/C` camera control after testing
+- Updated viewer guidance text to match the current shortcut layout.
+- Refined `6DoF` export values to use relative transform semantics with integer output for easier prompting.
+- Added `Refresh` action for camera history so an existing saved shot can be overwritten with the current preview pose.
+
+### Fixed
+
+- Reset focal length correctly when loading a new Gaussian without cached camera state.
+- Applied precision (`Shift`) handling consistently across keyboard movement and orbit interactions.
+- Hid the redundant camera info block so the description area has enough vertical space.
+- Smoothed roll rendering behavior for non-history camera updates while keeping restore/reset flows immediate.
+
 ## [0.4.1] - 2026-03-20
 
 ### Fixed

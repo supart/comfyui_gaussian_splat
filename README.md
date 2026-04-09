@@ -4,19 +4,20 @@ ComfyUI custom nodes for Gaussian viewer interaction and camera pose prompt cont
 
 ## Version
 
-- Current version: `0.4.1`
+- Current version: `0.4.2`
 
-## 0.4.1 Highlights
+## 0.4.2 Highlights
 
-- Fixed `Pick center: click a gaussian point` so clicking the viewer reliably selects a visible gaussian point again.
-- `Pick center` recentering is now handled independently from left-click rotate-center behavior.
-- `0.4.0` camera history, zoom separation, and startup camera fixes remain included in this release.
+- Split camera text output and `6DoF` output so workflow prompts can use them independently.
+- Updated viewer controls to the current `W/A/S/D + Q/E + R/F` layout and removed `Z/C` control.
+- Added `Refresh` action in camera history so an existing saved shot can be updated from the current preview.
+- Refined `6DoF` export values for relative-transform prompting and integer-style output.
 
 ## Features
 
 - `Gaussian Viewer Select` node for interactive 3D Gaussian scene control.
 - `Camera Pose Qwen Panel` node for camera prompt and pose parameters.
-- Camera history panel with explicit `Add to history` and `Reset` actions.
+- Camera history panel with explicit `Add to history`, `Refresh`, and `Reset` actions.
 - Roll correction (`roll`) and custom orbit center controls.
 - Camera state cache on cancel/reopen to keep pose continuity.
 

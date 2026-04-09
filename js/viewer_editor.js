@@ -1,4 +1,4 @@
-// Xiong Gaussian Viewer Editor with 3D Gizmo
+﻿// Xiong Gaussian Viewer Editor with 3D Gizmo
 // Smooth gizmo interaction - preview transform visually, apply on release
 
 // Import unified coordinate transform module
@@ -7,6 +7,7 @@ const CT = window.CoordinateTransform;
 
 const SPLAT = window.GSPLAT;
 
+const viewerContainer = document.getElementById('viewerContainer');
 const canvas = document.getElementById('canvas');
 const selectionCanvas = document.getElementById('selectionCanvas');
 const gizmoCanvas = document.getElementById('gizmoCanvas');
@@ -206,6 +207,10 @@ let cameraParams = {
     customOrbitCenter: null,
     hasCache: false,
 };
+const CAMERA_ROLL_DAMPING = 0.18;
+const CAMERA_ROLL_SNAP_EPSILON = 0.02;
+let currentRenderedCameraRoll = 0;
+let targetRenderedCameraRoll = 0;
 let lastCameraPositionForParams = null;
 let lastCameraUiSignature = '';
 let lastCameraUiUpdateAt = 0;
@@ -259,8 +264,31 @@ const HISTORY_MAX_ITEMS = 10;
 const AUTO_ORBIT_CENTER_SAMPLE_LIMIT = 30000;
 const AUTO_ROTATE_ORBIT_CENTER_SAMPLE_LIMIT = 12000;
 const AUTO_ROTATE_ORBIT_CENTER_MAX_DISTANCE_PX = 24;
+const ORBIT_CONTROLS_ORBIT_SPEED = 1.8;
 const ORBIT_CONTROLS_PAN_SPEED = 14.4;
+const ORBIT_CONTROLS_ZOOM_SPEED = 1;
 const CUSTOM_ORBIT_PAN_DISTANCE_FACTOR = 0.016;
+const KEYBOARD_CAMERA_MOVE_DISTANCE_FACTOR = 0.005;
+const KEYBOARD_CAMERA_MOVE_MIN_STEP = 0.01;
+const KEYBOARD_CAMERA_ROTATE_STEP_DEG = 0.6;
+const KEYBOARD_CAMERA_FINE_MULTIPLIER = 0.1;
+const KEYBOARD_CAMERA_KEY_CODES = new Set([
+    'KeyW',
+    'KeyA',
+    'KeyS',
+    'KeyD',
+    'ArrowUp',
+    'ArrowDown',
+    'ArrowLeft',
+    'ArrowRight',
+    'KeyQ',
+    'KeyE',
+    'KeyR',
+    'KeyF',
+    'ShiftLeft',
+    'ShiftRight',
+]);
+let pressedKeyboardCameraKeys = Object.create(null);
 
 // 铏氭嫙濮挎€佺悆 - 绱Н榧犳爣鏃嬭浆瑙掑害
 let virtualOrbitBall = {
@@ -419,6 +447,336 @@ function getCurrentViewTarget(referenceDistance = null) {
     return next;
 }
 
+function normalizePositiveAngle(angle) {
+    const numeric = Number(angle);
+    if (!Number.isFinite(numeric)) return 0;
+    let normalized = numeric % 360;
+    if (normalized < 0) normalized += 360;
+    return normalized;
+}
+
+function clampNumber(value, min, max) {
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric)) return min;
+    return Math.max(min, Math.min(max, numeric));
+}
+
+function clampCameraRoll(value) {
+    return clampNumber(value, -90, 90);
+}
+
+function getTargetCameraRoll() {
+    return clampCameraRoll(cameraParams.roll);
+}
+
+function getRenderedCameraRoll() {
+    return clampCameraRoll(currentRenderedCameraRoll);
+}
+
+function setCameraRollValue(value, options = null) {
+    const nextRoll = clampCameraRoll(value);
+    cameraParams.roll = nextRoll;
+    targetRenderedCameraRoll = nextRoll;
+    if (options?.immediate || !Number.isFinite(currentRenderedCameraRoll)) {
+        currentRenderedCameraRoll = nextRoll;
+    }
+    return nextRoll;
+}
+
+function updateRenderedCameraRoll() {
+    const targetRoll = clampCameraRoll(targetRenderedCameraRoll);
+    if (!Number.isFinite(currentRenderedCameraRoll)) {
+        currentRenderedCameraRoll = targetRoll;
+        return false;
+    }
+
+    const delta = targetRoll - currentRenderedCameraRoll;
+    if (Math.abs(delta) <= CAMERA_ROLL_SNAP_EPSILON) {
+        const changed = Math.abs(delta) > 1e-6;
+        currentRenderedCameraRoll = targetRoll;
+        return changed;
+    }
+
+    currentRenderedCameraRoll += delta * CAMERA_ROLL_DAMPING;
+    return true;
+}
+
+function buildCameraViewQuaternion(target, rollDeg = getRenderedCameraRoll()) {
+    if (!camera) return null;
+    const center = cloneCenter(target) || getActiveOrbitCenter();
+    if (!center) return null;
+
+    const dx = center.x - camera.position.x;
+    const dy = center.y - camera.position.y;
+    const dz = center.z - camera.position.z;
+    const len = Math.sqrt(dx * dx + dy * dy + dz * dz);
+    if (!Number.isFinite(len) || len < 1e-6) return null;
+
+    const baseQuat = SPLAT.Quaternion.FromEuler(
+        new SPLAT.Vector3(
+            Math.asin(-dy / len),
+            Math.atan2(dx / len, dz / len),
+            0
+        )
+    );
+
+    const safeRoll = clampNumber(rollDeg, -90, 90);
+    if (Math.abs(safeRoll) < 0.01) {
+        return baseQuat;
+    }
+
+    const axis = new SPLAT.Vector3(dx / len, dy / len, dz / len);
+    const rollQuat = SPLAT.Quaternion.FromAxisAngle(axis, CT.degToRad(safeRoll));
+    return rollQuat.multiply(baseQuat);
+}
+
+function getCameraViewAxes(target, rollDeg = getRenderedCameraRoll()) {
+    const quat = buildCameraViewQuaternion(target, rollDeg);
+    if (!quat) return null;
+    return {
+        right: quat.apply(new SPLAT.Vector3(1, 0, 0)),
+        up: quat.apply(new SPLAT.Vector3(0, 1, 0)),
+        forward: quat.apply(new SPLAT.Vector3(0, 0, 1)),
+    };
+}
+
+function isTextEntryElement(element) {
+    if (!element) return false;
+    if (element.isContentEditable) return true;
+    const tagName = String(element.tagName || '').toUpperCase();
+    return tagName === 'INPUT' || tagName === 'TEXTAREA' || tagName === 'SELECT';
+}
+
+function hasViewerKeyboardFocus() {
+    return document.activeElement === canvas;
+}
+
+function focusViewerCanvas() {
+    if (!canvas || hasViewerKeyboardFocus()) return;
+    try {
+        canvas.focus({ preventScroll: true });
+    } catch (error) {
+        canvas.focus();
+    }
+}
+
+function clearKeyboardCameraKeys() {
+    pressedKeyboardCameraKeys = Object.create(null);
+    syncOrbitControlPrecision();
+}
+
+function setKeyboardCameraKeyState(code, isPressed) {
+    if (!KEYBOARD_CAMERA_KEY_CODES.has(code)) return;
+    pressedKeyboardCameraKeys[code] = isPressed;
+}
+
+function isKeyboardCameraKey(code) {
+    return KEYBOARD_CAMERA_KEY_CODES.has(code);
+}
+
+function isKeyboardCameraCodePressed(code) {
+    if (code === 'KeyW') return Boolean(pressedKeyboardCameraKeys.KeyW || pressedKeyboardCameraKeys.ArrowUp);
+    if (code === 'KeyS') return Boolean(pressedKeyboardCameraKeys.KeyS || pressedKeyboardCameraKeys.ArrowDown);
+    if (code === 'KeyA') return Boolean(pressedKeyboardCameraKeys.KeyA || pressedKeyboardCameraKeys.ArrowLeft);
+    if (code === 'KeyD') return Boolean(pressedKeyboardCameraKeys.KeyD || pressedKeyboardCameraKeys.ArrowRight);
+    return Boolean(pressedKeyboardCameraKeys[code]);
+}
+
+function isPrecisionModifierPressed(event = null) {
+    return Boolean(
+        event?.shiftKey ||
+        isKeyboardCameraCodePressed('ShiftLeft') ||
+        isKeyboardCameraCodePressed('ShiftRight')
+    );
+}
+
+function syncOrbitControlPrecision(event = null) {
+    if (!controls) return;
+    const speedMultiplier = isPrecisionModifierPressed(event) ? KEYBOARD_CAMERA_FINE_MULTIPLIER : 1;
+    controls.zoomSpeed = ORBIT_CONTROLS_ZOOM_SPEED * speedMultiplier;
+    controls.orbitSpeed = ORBIT_CONTROLS_ORBIT_SPEED * speedMultiplier;
+    controls.panSpeed = ORBIT_CONTROLS_PAN_SPEED * speedMultiplier;
+}
+
+function shouldHandleKeyboardCameraControl() {
+    return Boolean(
+        camera &&
+        controls &&
+        !customOrbitEnabled &&
+        controls.enabled &&
+        hasViewerKeyboardFocus() &&
+        !centerPickMode &&
+        !isDraggingGizmo &&
+        !isSelecting &&
+        !pickedOrbitDragActive &&
+        !customOrbitDragging &&
+        !virtualOrbitBall.isDragging &&
+        !controlsRightPanDragging &&
+        controlsRightPanSyncFrames <= 0 &&
+        !controlsRightPanNeedsFinalize &&
+        (currentTool === 'orbit' || currentTool === 'pan')
+    );
+}
+
+function flushControlsToTarget(target) {
+    if (!controls) return;
+    controls.setCameraTarget(new SPLAT.Vector3(target.x, target.y, target.z));
+    const savedDampening = controls.dampening;
+    controls.dampening = 1;
+    controls.update();
+    controls.dampening = savedDampening;
+}
+
+function translateCameraAndTarget(delta, targetOverride = null) {
+    if (!camera || !controls) return null;
+    const baseTarget = cloneCenter(targetOverride)
+        || cloneCenter(getActiveOrbitCenter())
+        || getCurrentViewTarget(getSliderZoom())
+        || getDefaultOrbitCenter();
+    if (!baseTarget) return null;
+
+    camera.position.x += delta.x;
+    camera.position.y += delta.y;
+    camera.position.z += delta.z;
+
+    const nextTarget = {
+        x: baseTarget.x + delta.x,
+        y: baseTarget.y + delta.y,
+        z: baseTarget.z + delta.z,
+    };
+
+    currentOrbitTarget = cloneCenter(nextTarget);
+    cameraParams.targetCenter = cloneCenter(nextTarget);
+    cameraParams.orbitCenter = cloneCenter(nextTarget);
+    cameraParams.customOrbitCenter = cloneCenter(nextTarget);
+    updateOrbitCenterInputs(nextTarget);
+    lastCameraPositionForParams = null;
+    flushControlsToTarget(nextTarget);
+    return nextTarget;
+}
+
+function rotateKeyboardControlledCamera(deltaAzimuth, deltaElevation, deltaRoll, targetOverride = null) {
+    const target = cloneCenter(targetOverride)
+        || cloneCenter(getActiveOrbitCenter())
+        || getCurrentViewTarget(getSliderZoom())
+        || getDefaultOrbitCenter();
+    if (!target) return false;
+
+    const pose = computeCameraPoseFromView(target);
+    const currentAzimuth = Number.isFinite(Number(pose?.azimuth))
+        ? Number(pose.azimuth)
+        : (Number(cameraParams.azimuth) || 0);
+    const currentElevation = Number.isFinite(Number(pose?.elevation))
+        ? Number(pose.elevation)
+        : (Number(cameraParams.elevation) || 0);
+    const currentDistance = Number.isFinite(Number(pose?.distance)) && Number(pose.distance) > 1e-4
+        ? Number(pose.distance)
+        : Math.max(0.001, Number(getSliderZoom()) || DEFAULT_CAMERA_DISTANCE);
+
+    const nextAzimuth = normalizePositiveAngle(currentAzimuth + deltaAzimuth);
+    const nextElevation = clampNumber(
+        currentElevation + deltaElevation,
+        Number.isFinite(Number(CT.ELEVATION_MIN)) ? Number(CT.ELEVATION_MIN) : -30,
+        Number.isFinite(Number(CT.ELEVATION_MAX)) ? Number(CT.ELEVATION_MAX) : 90
+    );
+    const nextRoll = clampNumber((Number(cameraParams.roll) || 0) + deltaRoll, -90, 90);
+
+    window.syncCameraToViewer(nextAzimuth, nextElevation, currentDistance, target, nextRoll);
+    return true;
+}
+
+function applyKeyboardCameraControl() {
+    if (!shouldHandleKeyboardCameraControl()) return false;
+
+    const shiftPressed = isKeyboardCameraCodePressed('ShiftLeft') || isKeyboardCameraCodePressed('ShiftRight');
+    const speedMultiplier = shiftPressed ? KEYBOARD_CAMERA_FINE_MULTIPLIER : 1;
+    let activeTarget = cloneCenter(getActiveOrbitCenter())
+        || getCurrentViewTarget(getSliderZoom())
+        || getDefaultOrbitCenter();
+
+    const axes = getCameraViewAxes(activeTarget);
+    if (axes) {
+        const distance = getCenterDistance(camera?.position, activeTarget);
+        const moveStep = Math.max(
+            (Number.isFinite(distance) ? distance : DEFAULT_CAMERA_DISTANCE) * KEYBOARD_CAMERA_MOVE_DISTANCE_FACTOR,
+            KEYBOARD_CAMERA_MOVE_MIN_STEP
+        ) * speedMultiplier;
+        const moveDelta = { x: 0, y: 0, z: 0 };
+
+        if (isKeyboardCameraCodePressed('KeyW')) {
+            moveDelta.x += axes.forward.x * moveStep;
+            moveDelta.y += axes.forward.y * moveStep;
+            moveDelta.z += axes.forward.z * moveStep;
+        }
+        if (isKeyboardCameraCodePressed('KeyS')) {
+            moveDelta.x -= axes.forward.x * moveStep;
+            moveDelta.y -= axes.forward.y * moveStep;
+            moveDelta.z -= axes.forward.z * moveStep;
+        }
+        if (isKeyboardCameraCodePressed('KeyA')) {
+            moveDelta.x -= axes.right.x * moveStep;
+            moveDelta.y -= axes.right.y * moveStep;
+            moveDelta.z -= axes.right.z * moveStep;
+        }
+        if (isKeyboardCameraCodePressed('KeyD')) {
+            moveDelta.x += axes.right.x * moveStep;
+            moveDelta.y += axes.right.y * moveStep;
+            moveDelta.z += axes.right.z * moveStep;
+        }
+        if (isKeyboardCameraCodePressed('KeyQ')) {
+            moveDelta.y += moveStep;
+        }
+        if (isKeyboardCameraCodePressed('KeyE')) {
+            moveDelta.y -= moveStep;
+        }
+
+        if (Math.abs(moveDelta.x) > 1e-8 || Math.abs(moveDelta.y) > 1e-8 || Math.abs(moveDelta.z) > 1e-8) {
+            activeTarget = translateCameraAndTarget(moveDelta, activeTarget) || activeTarget;
+        }
+    }
+
+    let azimuthDelta = 0;
+    let elevationDelta = 0;
+    const rotateStep = KEYBOARD_CAMERA_ROTATE_STEP_DEG * speedMultiplier;
+
+    if (isKeyboardCameraCodePressed('KeyR')) elevationDelta += rotateStep;
+    if (isKeyboardCameraCodePressed('KeyF')) elevationDelta -= rotateStep;
+
+    if (azimuthDelta || elevationDelta) {
+        rotateKeyboardControlledCamera(azimuthDelta, elevationDelta, 0, activeTarget);
+        return true;
+    }
+
+    return Boolean(axes && (
+        isKeyboardCameraCodePressed('KeyW') ||
+        isKeyboardCameraCodePressed('KeyA') ||
+        isKeyboardCameraCodePressed('KeyS') ||
+        isKeyboardCameraCodePressed('KeyD') ||
+        isKeyboardCameraCodePressed('KeyQ') ||
+        isKeyboardCameraCodePressed('KeyE')
+    ));
+}
+
+function updateKeyboardShortcutHints() {
+    const rectButton = document.querySelector('.tool-btn[data-tool="rect"]');
+    if (rectButton) {
+        rectButton.title = '矩形选择 (B)';
+    }
+
+    if (statusText) {
+        statusText.textContent = 'V:视角 H:平移 B:矩形 L:套索 G:移动 T:旋转 | WASD/方向键:移动 Q上移 E下移 R/F:俯仰 Shift:精细 | DEL:删除';
+    }
+
+    const usageGuide = document.querySelector('.usage-guide-text');
+    if (usageGuide) {
+        usageGuide.innerHTML = [
+            '左键拖动画面旋转，并自动把点击处设为旋转中心；右键拖动画面平移；滚轮前后移动视角。',
+            '点击左侧画面后，W/A/S/D 或方向键移动，Q 上移，E 下移，R/F 俯仰，Shift 为 0.1x 精细控制。',
+            'Pick 可手动指定旋转中心；右侧历史镜头支持保存、还原和删除；重置相机可回到默认视角。'
+        ].join('<br>');
+    }
+}
+
 function syncControlsStateToCurrentView(referenceDistance = null) {
     if (!controls) return null;
     const next = getCurrentViewTarget(referenceDistance);
@@ -448,7 +806,7 @@ function resetCachedCameraParams() {
     cameraParams.azimuth = 0;
     cameraParams.elevation = 0;
     cameraParams.distance = DEFAULT_CAMERA_DISTANCE;
-    cameraParams.roll = 0;
+    setCameraRollValue(0, { immediate: true });
     cameraParams.targetCenter = { x: 0, y: 0, z: 0 };
     cameraParams.orbitCenter = null;
     cameraParams.customOrbitCenter = null;
@@ -467,7 +825,7 @@ function applyCachedCameraState(cameraState) {
     cameraParams.azimuth = getFiniteCameraNumber(cameraState.azimuth, 0);
     cameraParams.elevation = getFiniteCameraNumber(cameraState.elevation, 0);
     cameraParams.distance = getFiniteCameraNumber(cameraState.distance, DEFAULT_CAMERA_DISTANCE);
-    cameraParams.roll = getFiniteCameraNumber(cameraState.roll, 0);
+    setCameraRollValue(getFiniteCameraNumber(cameraState.roll, 0), { immediate: true });
     cameraParams.targetCenter = cloneCenter(orbitCenter) || { x: 0, y: 0, z: 0 };
     cameraParams.orbitCenter = cloneCenter(orbitCenter);
     cameraParams.customOrbitCenter = cloneCenter(orbitCenter);
@@ -698,7 +1056,7 @@ function applyWorldRotationAroundPivot(rotationQuat, pivot) {
 
 function rotateCameraAroundPickedPivot(pivot, dx, dy) {
     if (!camera || !pivot) return false;
-    const speed = (controls?.orbitSpeed || 1) * 0.003;
+    const speed = (controls?.orbitSpeed || ORBIT_CONTROLS_ORBIT_SPEED) * 0.003;
     const yawDelta = -dx * speed;
     const pitchDelta = dy * speed;
     if (Math.abs(yawDelta) < 1e-8 && Math.abs(pitchDelta) < 1e-8) {
@@ -1201,6 +1559,10 @@ function initViewer() {
         
         // 璁剧疆鍒濆鐒﹁窛锛?6mm杞崲涓哄儚绱犵劍璺濓級
         controls.panSpeed = ORBIT_CONTROLS_PAN_SPEED;
+        controls.zoomSpeed = ORBIT_CONTROLS_ZOOM_SPEED;
+        controls.orbitSpeed = ORBIT_CONTROLS_ORBIT_SPEED;
+        controls.panSpeed = ORBIT_CONTROLS_PAN_SPEED;
+        syncOrbitControlPrecision();
         applyFocalLengthToCamera(initialFocalLength);
         // 鍚屾鏇存柊婊戝潡鏄剧ず鍊?
         focalLengthSlider.value = initialFocalLength;
@@ -1263,8 +1625,11 @@ function initViewer() {
             
             if (customOrbitEnabled) updateCameraFromOrbit();
             else if (controls.enabled) {
+                const handledKeyboardCameraControl = applyKeyboardCameraControl();
                 const shouldSyncPanCenter = controlsRightPanDragging || controlsRightPanSyncFrames > 0;
-                controls.update();
+                if (!handledKeyboardCameraControl) {
+                    controls.update();
+                }
                 if (!controlsRightPanDragging && controlsRightPanSyncFrames > 0) {
                     controlsRightPanSyncFrames -= 1;
                 }
@@ -1275,6 +1640,7 @@ function initViewer() {
             const rawRotationForRender = camera?.rotation
                 ? new SPLAT.Quaternion(camera.rotation.x, camera.rotation.y, camera.rotation.z, camera.rotation.w)
                 : null;
+            updateRenderedCameraRoll();
             applyRollToCamera(customOrbitEnabled ? orbitTarget : getRollTargetForRender());
             renderer.render(scene, camera);
             if (rawRotationForRender) {
@@ -1337,12 +1703,13 @@ function setupCustomOrbitControls() {
     window.addEventListener('mousemove', (e) => {
         if (!customOrbitEnabled || !customOrbitDragging || isDraggingGizmo) return;
         const dx = e.clientX - customOrbitLastX, dy = e.clientY - customOrbitLastY;
+        const precisionMultiplier = isPrecisionModifierPressed(e) ? KEYBOARD_CAMERA_FINE_MULTIPLIER : 1;
         if (customOrbitButton === 0) {
-            orbitYaw -= dx * 0.005; orbitPitch += dy * 0.005;
+            orbitYaw -= dx * 0.005 * precisionMultiplier; orbitPitch += dy * 0.005 * precisionMultiplier;
             orbitPitch = Math.max(-Math.PI / 2 + 0.1, Math.min(Math.PI / 2 - 0.1, orbitPitch));
         } else if (customOrbitButton === 2) {
             // 鍙抽敭鎷栧姩锛氬钩绉昏鍥撅紝鍚屾椂鏇存柊orbitTarget锛堜腑蹇冪偣锛?
-            const panSpeed = orbitDistance * CUSTOM_ORBIT_PAN_DISTANCE_FACTOR;
+            const panSpeed = orbitDistance * CUSTOM_ORBIT_PAN_DISTANCE_FACTOR * precisionMultiplier;
             const panX = dx * panSpeed;
             const panY = dy * panSpeed;
             
@@ -1366,7 +1733,7 @@ function setupCustomOrbitControls() {
         if (!customOrbitEnabled || isDraggingGizmo) return;
         e.preventDefault(); e.stopPropagation();
         // 鎸変綇Shift鏃跺噺閫?.5鍊?
-        const speedMultiplier = e.shiftKey ? 0.0005 : 0.001;
+        const speedMultiplier = isPrecisionModifierPressed(e) ? 0.001 * KEYBOARD_CAMERA_FINE_MULTIPLIER : 0.001;
         orbitDistance += e.deltaY * orbitDistance * speedMultiplier;
         orbitDistance = Math.max(MIN_CONTINUOUS_ZOOM_DISTANCE, orbitDistance);
     }, true);
@@ -1396,16 +1763,17 @@ function setupVirtualOrbitBall() {
         
         const dx = e.clientX - virtualOrbitBall.lastMouseX;
         const dy = e.clientY - virtualOrbitBall.lastMouseY;
+        const precisionMultiplier = isPrecisionModifierPressed(e) ? KEYBOARD_CAMERA_FINE_MULTIPLIER : 1;
         
         // 姘村钩鏃嬭浆锛氬悜宸︽嫋鍔?= 鐪嬪埌鍙宠竟 = 瑙掑害澧炲姞
         // 鐏垫晱搴︼細涓巊splat鎺у埗鍣ㄤ竴鑷?0.003寮у害/鍍忕礌 鈮?0.17搴?鍍忕礌)
         const yawDelta = -dx * 0.003;  // 鍙栬礋浣垮悜宸︿负姝?
-        virtualOrbitBall.yaw += yawDelta;
+        virtualOrbitBall.yaw += yawDelta * precisionMultiplier;
         
         // 鍨傜洿鏃嬭浆锛氶紶鏍囧悜涓?淇=姝ｈ搴︼紝榧犳爣鍚戜笂=浠拌=璐熻搴?
         // 涓嶅彇鍙峝y锛屽悜涓嬫嫋鍔╠y涓烘鍊硷紝瀵瑰簲姝ｈ搴︼紙淇/鐪嬪埌椤堕儴锛?
         const pitchDelta = dy * 0.003;
-        virtualOrbitBall.pitch += pitchDelta;
+        virtualOrbitBall.pitch += pitchDelta * precisionMultiplier;
         
         // 闄愬埗浠拌鑼冨洿锛?30搴﹀埌90搴?
         const minPitch = -30 * (Math.PI / 180);
@@ -1502,7 +1870,7 @@ function setupToolbar() {
             let value = parseInt(rawValue, 10);
             if (!Number.isFinite(value)) value = 0;
             value = Math.max(-90, Math.min(90, value));
-            cameraParams.roll = value;
+            setCameraRollValue(value);
             rollInput.value = value;
             rollSlider.value = value;
         };
@@ -1550,6 +1918,8 @@ function setupToolbar() {
             updateStatus();
         });
     }
+
+    updateKeyboardShortcutHints();
 
     const applyDepthRangeValue = (rawValue) => {
         const parsed = parseFloat(rawValue);
@@ -2039,6 +2409,112 @@ function getCurrentFocalLengthValue(fallback = initialFocalLength) {
     return Number.isFinite(rawValue) ? rawValue : fallback;
 }
 
+function resetFocalLengthToDefault(options = {}) {
+    const { applyToCamera = false, updateInitialCameraData = false } = options;
+    const defaultValue = Number.isFinite(Number(initialFocalLength))
+        ? Number(initialFocalLength)
+        : 16;
+
+    if (focalLengthSlider) focalLengthSlider.value = defaultValue;
+    if (focalLengthValue) focalLengthValue.value = defaultValue;
+
+    if (applyToCamera) {
+        applyFocalLengthToCamera(defaultValue, { updateInitialCameraData });
+    }
+
+    return defaultValue;
+}
+
+function normalizeSignedAngle(angle) {
+    let normalized = Number(angle);
+    if (!Number.isFinite(normalized)) return 0;
+    normalized = ((normalized + 180) % 360 + 360) % 360 - 180;
+    if (Math.abs(normalized) < 1e-9) return 0;
+    return normalized;
+}
+
+function roundPoseNumber(value, digits = 2) {
+    const num = Number(value);
+    if (!Number.isFinite(num)) return 0;
+    return Number(num.toFixed(digits));
+}
+
+function formatPoseNumber(value, digits = 2) {
+    return String(roundPoseNumber(value, digits));
+}
+
+function roundPoseInteger(value) {
+    const num = Number(value);
+    if (!Number.isFinite(num)) return 0;
+    return Math.round(num);
+}
+
+function computePoseFromPositionAndTarget(position, targetCenter) {
+    const point = cloneCenter(position);
+    const target = cloneCenter(targetCenter);
+    if (!point || !target) return null;
+
+    try {
+        const pose = CT.GSplatAdapter.fromGSplatPosition(point.x, point.y, point.z, target);
+        if (!pose) return null;
+        const azimuth = Number(pose.azimuth);
+        const elevation = Number(pose.elevation);
+        const distance = Number(pose.zoom);
+        if (!Number.isFinite(azimuth) || !Number.isFinite(elevation) || !Number.isFinite(distance)) {
+            return null;
+        }
+        return { azimuth, elevation, distance };
+    } catch (error) {
+        console.warn('[GaussianViewer] Failed to compute pose from position/target:', error);
+        return null;
+    }
+}
+
+function generateBaseCameraDescription(params = null) {
+    params = params || calculateCameraParams();
+    if (!params) return '';
+
+    const zoom = getSliderZoom();
+    const azimuthLabel = getAzimuthLabel(params.azimuth);
+    const elevationLabel = getElevationLabel(params.elevation);
+    const zoomLabel = getZoomLabel(zoom);
+
+    return `${azimuthLabel}, ${elevationLabel}, ${zoomLabel} (horizontal: ${Math.round(params.azimuth)}, vertical: ${Math.round(params.elevation)}, zoom: ${zoom.toFixed(1)})`;
+}
+
+function buildSixDofPose(params = null) {
+    params = params || calculateCameraParams();
+    const currentPosition = camera ? {
+        x: camera.position.x,
+        y: camera.position.y,
+        z: camera.position.z,
+    } : null;
+    const initialPosition = cloneCenter(initialCameraData?.position);
+    const initialTarget = cloneCenter(initialCameraData?.target);
+    const initialPose = computePoseFromPositionAndTarget(initialPosition, initialTarget);
+
+    const dx = currentPosition && initialPosition ? (currentPosition.x - initialPosition.x) : 0;
+    const dy = currentPosition && initialPosition ? (currentPosition.y - initialPosition.y) : 0;
+    const dz = currentPosition && initialPosition ? (currentPosition.z - initialPosition.z) : 0;
+    const pitch = Number(params?.elevation) - Number(initialPose?.elevation || 0);
+    const yaw = normalizeSignedAngle(Number(params?.azimuth) - Number(initialPose?.azimuth || 0));
+    const roll = Number(params?.roll) - Number(initialPose?.roll || 0);
+
+    return {
+        x: roundPoseInteger(dx),
+        y: roundPoseInteger(dy),
+        z: roundPoseInteger(dz),
+        pitch: roundPoseInteger(pitch),
+        yaw: roundPoseInteger(yaw),
+        roll: roundPoseInteger(roll),
+    };
+}
+
+function generateSixDofDescription(params = null) {
+    const pose = buildSixDofPose(params);
+    return `{"x":${formatPoseNumber(pose.x)},"y":${formatPoseNumber(pose.y)},"z":${formatPoseNumber(pose.z)},"pitch":${formatPoseNumber(pose.pitch)},"yaw":${formatPoseNumber(pose.yaw)},"roll":${formatPoseNumber(pose.roll)}}`;
+}
+
 function applyFocalLengthToCamera(value, options = {}) {
     if (!camera) return;
     const nextValue = Number.isFinite(Number(value)) ? Number(value) : getCurrentFocalLengthValue();
@@ -2059,13 +2535,10 @@ function applyFocalLengthToCamera(value, options = {}) {
 function generateCameraDescription(params = null) {
     params = params || calculateCameraParams();
     if (!params) return '';
-    
-    const zoom = getSliderZoom();
-    const azimuthLabel = getAzimuthLabel(params.azimuth);
-    const elevationLabel = getElevationLabel(params.elevation);
-    const zoomLabel = getZoomLabel(zoom);
-    
-    return `${azimuthLabel}, ${elevationLabel}, ${zoomLabel} (horizontal: ${Math.round(params.azimuth)}, vertical: ${Math.round(params.elevation)}, zoom: ${zoom.toFixed(1)})`;
+
+    const baseDescription = generateBaseCameraDescription(params);
+    const sixDofDescription = generateSixDofDescription(params);
+    return `${baseDescription}\n\n6DoF: ${sixDofDescription}`;
 }
 
 /**
@@ -2208,6 +2681,14 @@ function setTool(tool) {
     if (centerPickMode && tool !== 'orbit' && tool !== 'pan') {
         setCenterPickMode(false);
     }
+
+    if (tool !== 'orbit' && tool !== 'pan') {
+        clearKeyboardCameraKeys();
+        syncOrbitControlPrecision();
+    } else if (!isTextEntryElement(document.activeElement)) {
+        focusViewerCanvas();
+        syncOrbitControlPrecision();
+    }
     
     updateMainCanvasCursor();
 }
@@ -2260,10 +2741,51 @@ function setupSelectionEvents() {
 }
 
 function setupKeyboard() {
+    if (canvas) {
+        canvas.tabIndex = 0;
+        canvas.style.outline = 'none';
+        canvas.addEventListener('mousedown', () => {
+            if (currentTool === 'orbit' || currentTool === 'pan') {
+                focusViewerCanvas();
+            }
+        }, true);
+        canvas.addEventListener('wheel', () => {
+            if (currentTool === 'orbit' || currentTool === 'pan') {
+                focusViewerCanvas();
+            }
+        }, { passive: true });
+        canvas.addEventListener('blur', () => {
+            clearKeyboardCameraKeys();
+            syncOrbitControlPrecision();
+        });
+    }
+
+    if (viewerContainer) {
+        viewerContainer.addEventListener('mousedown', (e) => {
+            if (!isTextEntryElement(e.target) && (currentTool === 'orbit' || currentTool === 'pan')) {
+                focusViewerCanvas();
+            }
+        }, true);
+    }
+
     document.addEventListener('keydown', (e) => {
-        if (e.target.tagName === 'INPUT') return;
+        if (isTextEntryElement(e.target)) return;
+        if (e.code === 'ShiftLeft' || e.code === 'ShiftRight') {
+            setKeyboardCameraKeyState(e.code, true);
+            syncOrbitControlPrecision(e);
+            return;
+        }
+        if (shouldHandleKeyboardCameraControl() && isKeyboardCameraKey(e.code)) {
+            setKeyboardCameraKeyState(e.code, true);
+            syncOrbitControlPrecision(e);
+            if (e.code !== 'ShiftLeft' && e.code !== 'ShiftRight') {
+                e.preventDefault();
+            }
+            return;
+        }
         if (e.key === 'Delete' || e.key === 'Backspace') { e.preventDefault(); deleteSelected(); }
         else if (e.key === 'Escape') {
+            clearKeyboardCameraKeys();
             if (centerPickMode) {
                 setCenterPickMode(false);
                 updateStatus();
@@ -2274,10 +2796,23 @@ function setupKeyboard() {
         }
         else if (e.key === 'i' || e.key === 'I') invertSelection();
         else if (e.key === 'v' || e.key === 'V') setTool('orbit');
-        else if (e.key === 'r' || e.key === 'R') setTool('rect');
+        else if (e.key === 'h' || e.key === 'H') setTool('pan');
+        else if (e.key === 'b' || e.key === 'B') setTool('rect');
         else if (e.key === 'l' || e.key === 'L') setTool('lasso');
         else if (e.key === 'g' || e.key === 'G') setTool('translate');
         else if (e.key === 't' || e.key === 'T') setTool('rotate');
+    });
+
+    document.addEventListener('keyup', (e) => {
+        if (isKeyboardCameraKey(e.code)) {
+            setKeyboardCameraKeyState(e.code, false);
+            syncOrbitControlPrecision(e);
+        }
+    });
+
+    window.addEventListener('blur', () => {
+        clearKeyboardCameraKeys();
+        syncOrbitControlPrecision();
     });
 }
 
@@ -3107,13 +3642,10 @@ function updateStatus() {
     const sel = selectedIndices.size;
     let text = `总点数: ${Math.floor(count)}`;
     if (sel > 0) text += ` | 已选中: ${sel}`;
-    text += ' | V:视角 R:矩形 L:套索 G:移动 T:旋转 DEL:删除';
-
+    text += ' | V:视角 H:平移 B:矩形 L:套索 G:移动 T:旋转 | WASD/方向键:移动 Q上移 E下移 R/F:俯仰 Shift:精细 | DEL:删除';
     if (centerPickMode) text += ' | Pick center: click a gaussian point';
     if (statusText) statusText.textContent = text;
     highlightSelection();
-    
-    // 鍚屾鍒?D鐩告満鎺у埗闈㈡澘
     syncViewerToCameraPanel();
 }
 
@@ -3151,7 +3683,7 @@ function highlightSelection() {
  * 鏍规嵁褰撳墠 X/Y 瑙掑害纭畾鐨勮鍥惧钩闈紝缁曡绾胯酱锛堢浉鏈衡啋鐩爣锛夋棆杞紝闈炲浐瀹氭柟鍚?
  * @param {object} [overrideTarget] - 鍙€夛紝鎸囧畾瑙傚療涓績 {x,y,z}锛屽 orbitTarget
  */
-function applyRollToCamera(overrideTarget) {
+function applyRollToCamera(overrideTarget, overrideRollDeg = null) {
     if (!camera) return;
     const target = cloneCenter(overrideTarget) || getActiveOrbitCenter();
     if (!target) return;
@@ -3171,7 +3703,8 @@ function applyRollToCamera(overrideTarget) {
         )
     );
 
-    const rollDeg = Math.max(-90, Math.min(90, Number(cameraParams.roll) || 0));
+    const resolvedRoll = overrideRollDeg == null ? getRenderedCameraRoll() : overrideRollDeg;
+    const rollDeg = clampCameraRoll(resolvedRoll);
     if (Math.abs(rollDeg) < 0.01) {
         camera.rotation = baseQuat;
         return;
@@ -3241,7 +3774,7 @@ function resetCamera() {
             cameraParams.elevation = actualParams.elevation;
         }
         cameraParams.distance = DEFAULT_CAMERA_DISTANCE;
-        cameraParams.roll = 0;
+        setCameraRollValue(0, { immediate: true });
         cameraParams.customOrbitCenter = null;
         cameraParams.orbitCenter = cloneCenter(currentOrbitTarget) || getDefaultOrbitCenter();
         updateOrbitCenterInputs(cameraParams.orbitCenter);
@@ -3257,9 +3790,7 @@ function resetCamera() {
     updateGaussianScale(defaultGaussianScale);
     
     // 閲嶇疆鐒﹁窛婊戝潡鍒板垵濮嬪€?
-    focalLengthSlider.value = initialFocalLength;
-    focalLengthValue.value = initialFocalLength;
-    updateFocalLength(initialFocalLength);
+    resetFocalLengthToDefault({ applyToCamera: true });
     // 閲嶇疆娣卞害鑼冨洿婊戝潡鍒板垵濮嬪€?
     depthRangeSlider.value = 5;
     if (depthRangeValue) depthRangeValue.textContent = '全部';
@@ -3359,7 +3890,30 @@ function getCurrentCameraSnapshot() {
         aspectRatio: typeof currentAspectRatio === 'string' && currentAspectRatio.trim() ? currentAspectRatio : 'original',
         outputWidth: Number.isFinite(Number(outputWidth)) ? Math.round(Number(outputWidth)) : originalOutputWidth,
         outputHeight: Number.isFinite(Number(outputHeight)) ? Math.round(Number(outputHeight)) : originalOutputHeight,
-        description: CT.generateCameraDescription(Math.round(azimuth), Math.round(elevation), safeDistance),
+        description: generateBaseCameraDescription({
+            azimuth,
+            elevation,
+            distance: safeDistance,
+            roll: safeRoll,
+        }),
+        prompt_description: generateCameraDescription({
+            azimuth,
+            elevation,
+            distance: safeDistance,
+            roll: safeRoll,
+        }),
+        sixdof_description: generateSixDofDescription({
+            azimuth,
+            elevation,
+            distance: safeDistance,
+            roll: safeRoll,
+        }),
+        pose6dof: buildSixDofPose({
+            azimuth,
+            elevation,
+            distance: safeDistance,
+            roll: safeRoll,
+        }),
         orbitCenter: cloneCenter(orbitCenter),
         target: cloneCenter(orbitCenter),
     };
@@ -3403,6 +3957,17 @@ function buildCurrentCameraHistoryEntry() {
     };
 }
 
+function buildUpdatedCameraHistoryEntry(entry) {
+    const seqRaw = Number(entry?.seq);
+    const seq = Number.isFinite(seqRaw) && seqRaw > 0 ? Math.floor(seqRaw) : getNextHistorySeq();
+    return {
+        ...(entry && typeof entry === 'object' ? entry : {}),
+        ...getCurrentCameraSnapshot(),
+        seq,
+        timestamp: Date.now() / 1000,
+    };
+}
+
 function prependCameraHistoryEntry(entry) {
     if (!entry) return false;
     if (cameraHistory.length > 0 && areSameHistoryPose(cameraHistory[0], entry)) {
@@ -3431,6 +3996,69 @@ window.addCurrentCameraToHistory = function() {
         } catch (e) {
             console.warn('[GaussianViewer] Failed to post ADD_CAMERA_HISTORY:', e);
         }
+    }
+};
+
+function replaceCameraHistoryEntry(seq, nextEntry) {
+    if (!Number.isFinite(seq) || seq <= 0 || !nextEntry) return false;
+
+    let updated = false;
+    cameraHistory = cameraHistory.map((item) => {
+        const itemSeq = Math.floor(Number(item?.seq));
+        if (!updated && itemSeq === seq) {
+            updated = true;
+            return {
+                ...item,
+                ...nextEntry,
+                seq,
+            };
+        }
+        return item;
+    });
+
+    if (updated) {
+        renderCameraHistory();
+    }
+    return updated;
+}
+
+window.updateCameraHistoryEntry = async function(entry) {
+    const seqRaw = Number(entry?.seq);
+    const seq = Number.isFinite(seqRaw) && seqRaw > 0 ? Math.floor(seqRaw) : null;
+    if (seq === null) return;
+
+    const nextEntry = buildUpdatedCameraHistoryEntry(entry);
+    const previousHistory = cameraHistory.map((item) => ({ ...item }));
+    const updated = replaceCameraHistoryEntry(seq, nextEntry);
+    if (!updated) return;
+
+    if (typeof nodeId === 'undefined' || nodeId == null) {
+        return;
+    }
+
+    try {
+        const response = await fetch('/gaussian_viewer/update_history', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                node_id: String(nodeId),
+                seq,
+                camera_state: nextEntry,
+            }),
+        });
+        const result = await response.json();
+        if (!response.ok || result?.success === false) {
+            throw new Error(result?.error || `HTTP ${response.status}`);
+        }
+
+        if (Array.isArray(result.history)) {
+            cameraHistory = resequenceCameraHistory(result.history.slice(0, HISTORY_MAX_ITEMS));
+            renderCameraHistory();
+        }
+    } catch (e) {
+        console.warn('[GaussianViewer] Failed to update history entry:', e);
+        cameraHistory = previousHistory;
+        renderCameraHistory();
     }
 };
 
@@ -3584,6 +4212,9 @@ async function loadPLYFromData(arrayBuffer, filename, ext, intr) {
         while (scene.objects?.length > 0) scene.removeObject(scene.objects[0]);
         currentSplat = null; selectedIndices.clear();
         gaussianScaleCompensation = 1.0;
+        if (!cameraParams.hasCache) {
+            resetFocalLengthToDefault({ applyToCamera: true });
+        }
         if (intr?.length >= 2) gaussianScaleCompensation = intr[0][2] * 2 / (canvas.clientWidth || 512);
         
         const blob = new Blob([arrayBuffer], { type: 'application/octet-stream' });
@@ -3643,7 +4274,7 @@ async function loadPLYFromData(arrayBuffer, filename, ext, intr) {
             cameraParams.azimuth = 0;
             cameraParams.elevation = 0;
             cameraParams.distance = DEFAULT_CAMERA_DISTANCE;
-            cameraParams.roll = 0;
+            setCameraRollValue(0, { immediate: true });
             cameraParams.customOrbitCenter = null;
             cameraParams.targetCenter = cloneCenter(currentOrbitTarget) || getDefaultOrbitCenter();
             cameraParams.orbitCenter = cloneCenter(currentOrbitTarget) || getDefaultOrbitCenter();
@@ -3660,7 +4291,8 @@ async function loadPLYFromData(arrayBuffer, filename, ext, intr) {
                         typeof cameraParams.elevation === 'number' ? cameraParams.elevation : 0,
                         typeof cameraParams.distance === 'number' ? cameraParams.distance : DEFAULT_CAMERA_DISTANCE,
                         cameraParams.customOrbitCenter || cameraParams.orbitCenter || null,
-                        typeof cameraParams.roll === 'number' ? cameraParams.roll : 0
+                        typeof cameraParams.roll === 'number' ? cameraParams.roll : 0,
+                        { immediateRoll: true }
                     );
                 }
             } catch (e) {
@@ -3869,11 +4501,11 @@ function getOrbitCenter() {
  * @param {object} [orbitCenter] - 鍙€夛細鎸囧畾 orbit 涓績鐐?{x,y,z}锛屼笉浼犲垯鐢?initialCameraData.target
  * @param {number} [roll] - 姘村钩鏍℃ (-90 to 90)
  */
-window.syncCameraToViewer = function(azimuth, elevation, zoom, orbitCenter, roll) {
+window.syncCameraToViewer = function(azimuth, elevation, zoom, orbitCenter, roll, options = null) {
     if (!camera || !controls) return;
     
     const rollVal = typeof roll === 'number' ? roll : (cameraParams.roll || 0);
-    cameraParams.roll = Math.max(-90, Math.min(90, rollVal));
+    setCameraRollValue(rollVal, { immediate: options?.immediateRoll === true });
     
     // 浣跨敤浼犲叆鐨?orbitCenter锛堣繕鍘熶繚瀛樻椂鐨勮瀵熶腑蹇冿級锛屽惁鍒欑敤 initialCameraData.target
     const explicitTarget = cloneCenter(orbitCenter);
@@ -4076,6 +4708,14 @@ function renderCameraHistory() {
             applyCameraHistoryEntry(entry);
         });
 
+        const updateBtn = document.createElement('button');
+        updateBtn.className = 'history-update-btn';
+        updateBtn.textContent = '刷新';
+        updateBtn.title = '用当前预览参数更新这条历史镜头';
+        updateBtn.addEventListener('click', () => {
+            window.updateCameraHistoryEntry(entry);
+        });
+
         const deleteBtn = document.createElement('button');
         deleteBtn.className = 'history-delete-btn';
         deleteBtn.textContent = 'Del';
@@ -4084,6 +4724,7 @@ function renderCameraHistory() {
             window.deleteCameraHistoryEntry(entry);
         });
 
+        actions.appendChild(updateBtn);
         actions.appendChild(btn);
         actions.appendChild(deleteBtn);
 
@@ -4121,7 +4762,7 @@ function applyCameraHistoryEntry(entry) {
 
     // Prefer exact camera position restore when available.
     if (camera && controls && target && position) {
-        cameraParams.roll = roll;
+        setCameraRollValue(roll, { immediate: true });
         cameraParams.customOrbitCenter = cloneCenter(target);
         cameraParams.targetCenter = cloneCenter(target);
         cameraParams.orbitCenter = cloneCenter(target);
@@ -4139,14 +4780,14 @@ function applyCameraHistoryEntry(entry) {
         controls.update();
         controls.dampening = savedDampening;
 
-        applyRollToCamera(target);
+        applyRollToCamera(target, getTargetCameraRoll());
         camera.update();
 
         const recalculated = calculateCameraParams();
         cameraParams.azimuth = Number.isFinite(recalculated?.azimuth) ? recalculated.azimuth : az;
         cameraParams.elevation = Number.isFinite(recalculated?.elevation) ? recalculated.elevation : el;
         cameraParams.distance = dist;
-        cameraParams.roll = roll;
+        setCameraRollValue(roll, { immediate: true });
         updateGaussianScale(scale);
 
         syncViewerToCameraPanel();
@@ -4172,8 +4813,8 @@ function applyCameraHistoryEntry(entry) {
     cameraParams.azimuth = az;
     cameraParams.elevation = el;
     cameraParams.distance = dist;
-    cameraParams.roll = roll;
-    syncCameraToViewer(az, el, dist, target || null, roll);
+    setCameraRollValue(roll, { immediate: true });
+    syncCameraToViewer(az, el, dist, target || null, roll, { immediateRoll: true });
     updateGaussianScale(scale);
 
     const zoomSlider = document.getElementById('zoomSlider');
@@ -4197,4 +4838,5 @@ setTimeout(() => {
     syncViewerToCameraPanel();
 }, 100);
 console.log('[GaussianViewer] Editor ready with 3D sync');
+
 

@@ -47,6 +47,70 @@ def _to_int(value, default=None):
         return default
 
 
+def _normalize_signed_angle(value):
+    angle = _to_float(value, 0.0)
+    angle = ((angle + 180.0) % 360.0 + 360.0) % 360.0 - 180.0
+    if abs(angle) < 1e-9:
+        return 0.0
+    return angle
+
+
+def _round_pose_number(value, digits=2):
+    number = _to_float(value, 0.0)
+    return round(number, digits)
+
+
+def _format_pose_number(value, digits=2):
+    number = _round_pose_number(value, digits)
+    if abs(number) < 1e-9:
+        number = 0.0
+    return format(number, "g")
+
+
+def _build_pose6dof(camera_state):
+    if not isinstance(camera_state, dict):
+        camera_state = {}
+
+    pose = camera_state.get("pose6dof")
+    if isinstance(pose, dict):
+        return {
+            "x": _round_pose_number(pose.get("x"), 2),
+            "y": _round_pose_number(pose.get("y"), 2),
+            "z": _round_pose_number(pose.get("z"), 2),
+            "pitch": _round_pose_number(pose.get("pitch"), 2),
+            "yaw": _round_pose_number(pose.get("yaw"), 2),
+            "roll": _round_pose_number(pose.get("roll"), 2),
+        }
+
+    position = camera_state.get("position")
+    if not isinstance(position, dict):
+        position = {}
+
+    return {
+        "x": _round_pose_number(position.get("x"), 2),
+        "y": _round_pose_number(position.get("y"), 2),
+        "z": _round_pose_number(position.get("z"), 2),
+        "pitch": _round_pose_number(camera_state.get("elevation"), 2),
+        "yaw": _round_pose_number(_normalize_signed_angle(camera_state.get("azimuth")), 2),
+        "roll": _round_pose_number(camera_state.get("roll"), 2),
+    }
+
+
+def _pose6dof_to_string(pose):
+    if not isinstance(pose, dict):
+        pose = {}
+    return (
+        "{"
+        f"\"x\":{_format_pose_number(pose.get('x'), 2)},"
+        f"\"y\":{_format_pose_number(pose.get('y'), 2)},"
+        f"\"z\":{_format_pose_number(pose.get('z'), 2)},"
+        f"\"pitch\":{_format_pose_number(pose.get('pitch'), 2)},"
+        f"\"yaw\":{_format_pose_number(pose.get('yaw'), 2)},"
+        f"\"roll\":{_format_pose_number(pose.get('roll'), 2)}"
+        "}"
+    )
+
+
 def _normalize_camera_snapshot(camera_state):
     if not isinstance(camera_state, dict):
         return None
@@ -72,6 +136,9 @@ def _normalize_camera_snapshot(camera_state):
     description = camera_state.get("description") or generate_camera_description(
         azimuth, elevation, distance
     )
+    prompt_description = camera_state.get("prompt_description")
+    sixdof_description = camera_state.get("sixdof_description")
+    pose6dof = camera_state.get("pose6dof")
     position = camera_state.get("position")
     target = camera_state.get("target")
     orbit_center = camera_state.get("orbitCenter")
@@ -91,6 +158,12 @@ def _normalize_camera_snapshot(camera_state):
         "target": target,
         "orbitCenter": orbit_center,
     }
+    if isinstance(prompt_description, str) and prompt_description.strip():
+        snapshot["prompt_description"] = prompt_description
+    if isinstance(sixdof_description, str) and sixdof_description.strip():
+        snapshot["sixdof_description"] = sixdof_description
+    if isinstance(pose6dof, dict):
+        snapshot["pose6dof"] = dict(pose6dof)
     if seq is not None and seq > 0:
         snapshot["seq"] = seq
     return snapshot
@@ -281,6 +354,36 @@ def _remove_camera_history_entry(str_key, seq):
     return filtered, removed
 
 
+def _update_camera_history_entry(str_key, seq, snapshot):
+    history_key = f"history:{str_key}"
+    history = CAMERA_STATE_CACHE.get(history_key, [])
+    if not isinstance(history, list):
+        history = []
+
+    seq = _to_int(seq, None)
+    if seq is None or seq <= 0 or snapshot is None:
+        return history, False
+
+    updated = False
+    next_history = []
+    for item in history:
+        item_seq = _to_int(item.get("seq"), None) if isinstance(item, dict) else None
+        if not updated and item_seq == seq:
+            next_item = dict(item) if isinstance(item, dict) else {}
+            next_item.update(dict(snapshot))
+            next_item["seq"] = seq
+            next_history.append(next_item)
+            updated = True
+            continue
+        next_history.append(item)
+
+    if not updated:
+        return history, False
+
+    CAMERA_STATE_CACHE[history_key] = next_history
+    return next_history, True
+
+
 def _safe_realpath(path):
     return os.path.realpath(os.path.abspath(os.path.expanduser(path)))
 
@@ -387,8 +490,8 @@ class GaussianViewerSelect:
             "hidden": {"unique_id": "UNIQUE_ID", "prompt": "PROMPT"},
         }
 
-    RETURN_TYPES = ("IMAGE", "IMAGE", "INT", "INT", "FLOAT", "FLOAT", "FLOAT", "STRING")
-    RETURN_NAMES = ("image", "camera_panel", "width", "height", "azimuth", "elevation", "zoom", "camera_description")
+    RETURN_TYPES = ("IMAGE", "IMAGE", "INT", "INT", "FLOAT", "FLOAT", "FLOAT", "STRING", "STRING")
+    RETURN_NAMES = ("image", "camera_panel", "width", "height", "azimuth", "elevation", "zoom", "camera_description", "camera_6dof")
     FUNCTION = "run"
     CATEGORY = "3D/Gaussian"
     OUTPUT_NODE = True
@@ -442,6 +545,14 @@ class GaussianViewerSelect:
         default_azimuth = 0.0
         default_elevation = 0.0
         default_distance = 5.0
+        default_pose6dof = {
+            "x": 0.0,
+            "y": 0.0,
+            "z": 0.0,
+            "pitch": default_elevation,
+            "yaw": _normalize_signed_angle(default_azimuth),
+            "roll": 0.0,
+        }
         return {
             'azimuth': default_azimuth,
             'elevation': default_elevation,
@@ -449,6 +560,8 @@ class GaussianViewerSelect:
             'description': generate_camera_description(
                 default_azimuth, default_elevation, default_distance
             ),
+            'pose6dof': default_pose6dof,
+            'pose6dof_string': _pose6dof_to_string(default_pose6dof),
         }
 
     def extract_camera_params(self, result):
@@ -457,18 +570,25 @@ class GaussianViewerSelect:
         azimuth = float(camera_state.get('azimuth', 0.0))
         elevation = float(camera_state.get('elevation', 0.0))
         distance = float(camera_state.get('distance', 5.0))
-        
-        # Generate description using QwenMultiAngle functions
-        description = generate_camera_description(azimuth, elevation, distance)
+
+        description = camera_state.get('description')
+        if not isinstance(description, str) or not description.strip():
+            description = generate_camera_description(azimuth, elevation, distance)
+
+        pose6dof = _build_pose6dof(camera_state)
+        pose6dof_string = _pose6dof_to_string(pose6dof)
         
         params = {
             'azimuth': azimuth,
             'elevation': elevation,
             'distance': distance,
-            'description': description
+            'description': description,
+            'pose6dof': pose6dof,
+            'pose6dof_string': pose6dof_string,
         }
         print(f"[GaussianViewer] Camera params: azimuth={params['azimuth']:.1f}, elevation={params['elevation']:.1f}, distance={params['distance']:.1f}")
         print(f"[GaussianViewer] Camera description: {params['description']}")
+        print(f"[GaussianViewer] Camera 6DoF: {params['pose6dof_string']}")
         return params
 
     def extrinsics_to_rotation(self, extrinsics):
@@ -577,19 +697,22 @@ class GaussianViewerSelect:
                 if image_np is not None:
                     print(f"[GaussianViewer] Using screenshot from viewer, final size: {image_np.shape}")
                     return (torch.from_numpy(image_np).unsqueeze(0), camera_panel, output_width, output_height,
-                            cam_params['azimuth'], cam_params['elevation'], cam_params['distance'], cam_params['description'])
+                            cam_params['azimuth'], cam_params['elevation'], cam_params['distance'], cam_params['description'],
+                            cam_params['pose6dof_string'])
 
             print(f"[GaussianViewer] No valid screenshot, using fallback")
             image_np = self.render_fallback(output_width, output_height, background)
             return (torch.from_numpy(image_np).unsqueeze(0), camera_panel, output_width, output_height,
-                    cam_params['azimuth'], cam_params['elevation'], cam_params['distance'], cam_params['description'])
+                    cam_params['azimuth'], cam_params['elevation'], cam_params['distance'], cam_params['description'],
+                    cam_params['pose6dof_string'])
 
         # Pass through mode
         if mode == "Pass Through":
             image_np = self.render_fallback(width, height, background)
             default_params = self.get_default_camera_params()
             return (torch.from_numpy(image_np).unsqueeze(0), self.make_fallback_panel(), width, height,
-                    default_params['azimuth'], default_params['elevation'], default_params['distance'], default_params['description'])
+                    default_params['azimuth'], default_params['elevation'], default_params['distance'], default_params['description'],
+                    default_params['pose6dof_string'])
 
         # Always Pause mode
         print(f"[GaussianViewer] Sending show event for node_id={node_id}")
@@ -685,7 +808,8 @@ class GaussianViewerSelect:
                 image_np = self.render_fallback(width, height, background)
                 default_params = self.get_default_camera_params()
                 return (torch.from_numpy(image_np).unsqueeze(0), self.make_fallback_panel(), width, height,
-                        default_params['azimuth'], default_params['elevation'], default_params['distance'], default_params['description'])
+                        default_params['azimuth'], default_params['elevation'], default_params['distance'], default_params['description'],
+                        default_params['pose6dof_string'])
 
         result = PENDING_SELECTIONS.pop(node_id)
         if node_id in WAITING_NODES:
@@ -705,12 +829,14 @@ class GaussianViewerSelect:
             if image_np is not None:
                 print(f"[GaussianViewer] Using screenshot from viewer, final size: {image_np.shape}")
                 return (torch.from_numpy(image_np).unsqueeze(0), camera_panel, output_width, output_height,
-                        cam_params['azimuth'], cam_params['elevation'], cam_params['distance'], cam_params['description'])
+                        cam_params['azimuth'], cam_params['elevation'], cam_params['distance'], cam_params['description'],
+                        cam_params['pose6dof_string'])
 
         print(f"[GaussianViewer] No valid screenshot, using fallback")
         image_np = self.render_fallback(output_width, output_height, background)
         return (torch.from_numpy(image_np).unsqueeze(0), camera_panel, output_width, output_height,
-                cam_params['azimuth'], cam_params['elevation'], cam_params['distance'], cam_params['description'])
+                cam_params['azimuth'], cam_params['elevation'], cam_params['distance'], cam_params['description'],
+                cam_params['pose6dof_string'])
 
 
 # ===== API Routes =====
@@ -771,6 +897,29 @@ async def gaussian_delete_history(request):
 
     history, removed = _remove_camera_history_entry(str_key, data.get("seq"))
     if not removed:
+        return web.json_response(
+            {"success": False, "error": "History entry not found", "history": history},
+            status=404,
+        )
+
+    return web.json_response(
+        {"success": True, "history_count": len(history), "history": history}
+    )
+
+
+@PromptServer.instance.routes.post("/gaussian_viewer/update_history")
+async def gaussian_update_history(request):
+    """Update one camera snapshot in per-node history by sequence id."""
+    data = await request.json()
+    node_id = data.get("node_id")
+    str_key = str(node_id)
+
+    snapshot = _normalize_camera_snapshot(data.get("camera_state"))
+    if snapshot is None:
+        return web.json_response({"success": False, "error": "Invalid camera_state"}, status=400)
+
+    history, updated = _update_camera_history_entry(str_key, data.get("seq"), snapshot)
+    if not updated:
         return web.json_response(
             {"success": False, "error": "History entry not found", "history": history},
             status=404,
